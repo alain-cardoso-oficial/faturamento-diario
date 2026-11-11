@@ -22,3 +22,4 @@ if [ -d "$APP_DIR/data" ]; then
 else
     echo "Diretório de dados $APP_DIR/data não encontrado."
 fi
+

@@ -22,3 +22,4 @@ echo "--------------------------------------------------------"
 echo " Deploy concluído com sucesso!"
 echo " Acompanhe os logs com: pm2 logs bi-vendas --lines 30"
 echo "--------------------------------------------------------"
+
