@@ -139,6 +139,8 @@ function buildPayload(all) {
 }
 
 let updating = null;
+let recoveryTimer = null;
+let reconciliationState = {status:'ok', pending:0, message:''};
 function hasFullDetail(order) {
   return order?._tinyDetail === true || Array.isArray(order?.itens) || Object.prototype.hasOwnProperty.call(order || {}, 'total_pedido');
 }
@@ -157,6 +159,13 @@ async function enrichAccount(account, cache, summaries) {
       break;
     }
   }
+  const unresolved = summaries.filter(summary => countableSale(summary) && !hasFullDetail(cache[`${account.empresa}:${summary.id}`]));
+  if (unresolved.length) {
+    const error = new Error(`Reconciliação pendente em ${account.empresa}: ${unresolved.length} pedido(s) aguardando detalhe da API`);
+    error.code = 'RECONCILIATION_PENDING';
+    error.pending = unresolved.length;
+    throw error;
+  }
   return summaries.map(summary => {
     const detail = cache[`${account.empresa}:${summary.id}`];
     return {order:{...summary,...(detail || {})}, detailed:hasFullDetail(detail)};
@@ -164,6 +173,7 @@ async function enrichAccount(account, cache, summaries) {
 }
 async function updateData() {
   if (updating) return updating;
+  reconciliationState = {status:'updating', pending:0, message:'Conferindo todos os pedidos do dia'};
   updating = (async () => {
     const cache = readDetailCache();
     const summariesByAccount = await Promise.all(accounts.map(searchOrders));
@@ -192,9 +202,25 @@ async function updateData() {
     if (existing >= 0) snapshots[existing] = snapshot; else snapshots.push(snapshot);
     snapshots = snapshots.sort((a,b)=>new Date(a.at)-new Date(b.at)).slice(-48);
     writeJson(SNAPSHOTS, snapshots);
+    reconciliationState = {status:'ok', pending:0, message:'Carga reconciliada sem pendências'};
     return buildPayload(snapshots);
   })();
-  try { return await updating; } finally { updating = null; }
+  try { return await updating; }
+  catch (error) {
+    reconciliationState = {status:'retrying', pending:Number(error.pending||0), message:error.message};
+    if (error.code === 'RECONCILIATION_PENDING' || /Excedido o número de acessos/i.test(error.message)) queueRecovery();
+    throw error;
+  }
+  finally { updating = null; }
+}
+function queueRecovery() {
+  if (recoveryTimer) return;
+  recoveryTimer = setTimeout(async () => {
+    recoveryTimer = null;
+    try { await updateData(); console.log('Reconciliação automática concluída'); }
+    catch (error) { console.error(`Reconciliação automática: ${error.message}`); }
+  }, 60000);
+  recoveryTimer.unref?.();
 }
 function schedule() {
   const now = new Date(), delay = (30-now.getMinutes()%30)*60000-now.getSeconds()*1000-now.getMilliseconds()+2000;
@@ -202,4 +228,4 @@ function schedule() {
 }
 function json(res,code,body){res.writeHead(code,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});res.end(JSON.stringify(body));}
 function serve(req,res){const url=new URL(req.url,'http://localhost'),file=url.pathname==='/'?'index.html':decodeURIComponent(url.pathname.slice(1)),target=path.resolve(PUBLIC,file);if(!target.startsWith(path.resolve(PUBLIC)))return json(res,403,{error:'Acesso negado'});fs.readFile(target,(error,data)=>{if(error)return json(res,404,{error:'Não encontrado'});const type={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.png':'image/png'}[path.extname(target)]||'application/octet-stream';res.writeHead(200,{'Content-Type':type,'Cache-Control':'no-store'});res.end(data);});}
-http.createServer(async(req,res)=>{const url=new URL(req.url,'http://localhost');if(url.pathname==='/api/update-data'){try{return json(res,200,await updateData())}catch(error){console.error(error);return json(res,500,{error:error.message})}}if(url.pathname==='/api/data')return json(res,200,{...buildPayload(readJson(SNAPSHOTS,[])),updating:Boolean(updating)});serve(req,res);}).listen(PORT,()=>{console.log(`Black Friday BI Tiny: http://localhost:${PORT}`);if(process.env.DISABLE_AUTO_UPDATE!=='1')schedule();});
+http.createServer(async(req,res)=>{const url=new URL(req.url,'http://localhost');if(url.pathname==='/api/update-data'){try{return json(res,200,{...await updateData(),reconciliation:reconciliationState})}catch(error){console.error(error);return json(res,500,{error:error.message,reconciliation:reconciliationState})}}if(url.pathname==='/api/data')return json(res,200,{...buildPayload(readJson(SNAPSHOTS,[])),updating:Boolean(updating),reconciliation:reconciliationState});serve(req,res);}).listen(PORT,()=>{console.log(`Black Friday BI Tiny: http://localhost:${PORT}`);if(process.env.DISABLE_AUTO_UPDATE!=='1')schedule();});
