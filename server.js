@@ -84,6 +84,8 @@ function ecommerceName(order) {
 }
 function channel(order) {
   const markers = (order.marcadores || []).map(x => x?.marcador?.descricao || x?.descricao || '').join(' ');
+  const seller = String(order.nome_vendedor || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().replace(/\s+/g, ' ').toUpperCase();
+  if (/^(GABRIEL BARBOSA|CAMILA WALESKO|ANDREIA OTTO)$/.test(seller)) return 'Vendas Diretas';
   const raw = [ecommerceName(order), order.intermediador?.nome, order.nome_vendedor, order.forma_pagamento, order.obs, order.observacoes, order.obs_interna, markers, order.forma_envio].filter(Boolean).join(' ').toUpperCase();
   if (/TRAY/.test(raw)) return 'Site';
   if (/MERCADO\s*LIVRE|\bMELI\b/.test(raw)) return 'Meli';
@@ -133,7 +135,7 @@ function buildPayload(all) {
     previousGmv = gmv; previousOrders = orderCount;
     return item;
   });
-  return {updatedAt:latest.at||null,dataDate:latest.dataDate||today,series,currentChannels:latest.channels||{},snapshotHistory,snapshots:snapshots.length,source:'Tiny API Oficial + Prioriza',accounts:latest.accounts||[],business:latest.business||[],analytics:latest.analytics||[],metrics:{totalGmv,totalOrders,ticket:totalOrders?totalGmv/totalOrders:0}};
+  return {updatedAt:latest.at||null,dataDate:latest.dataDate||today,series,currentChannels:latest.channels||{},previousChannels:snapshots.at(-2)?.channels||{},snapshotHistory,snapshots:snapshots.length,source:'Tiny API Oficial + Prioriza',accounts:latest.accounts||[],business:latest.business||[],analytics:latest.analytics||[],metrics:{totalGmv,totalOrders,ticket:totalOrders?totalGmv/totalOrders:0}};
 }
 
 let updating = null;
