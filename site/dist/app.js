@@ -36,15 +36,15 @@ function renderChart(){
   document.querySelector('#chartTitle').textContent='GMV POR ATUALIZAÇÃO (30 MIN)';
   document.querySelector('#chartLegend').innerHTML=isUpdating?'<i class="orange"></i> Nova janela em processamento':'<i class="orange"></i> Incrementos confirmados';
   if(!history.length){document.querySelector('#axis').innerHTML=[0,0,0,0,0].map(money).map(v=>`<span>${v}</span>`).join('');document.querySelector('#hourlyChart').innerHTML='';document.querySelector('#peakLabel').textContent='Nenhum snapshot registrado';return}
-  let points=history.map((s,i)=>({label:s.slot,value:i===0?0:(s.deltaGmv||0),baseline:i===0,total:s.gmv}));
+  let points=history.map((s,i)=>({label:s.slot,value:i===0?Number(s.gmv||0):Number(s.deltaGmv||0),baseline:i===0,total:s.gmv}));
   if(activeChannel!=='all'){
     const row=data.find(d=>d.channel===activeChannel);
-    points=(row?.hours||[]).map((h,i)=>({label:h.hour,value:i===0?0:h.value,baseline:i===0,total:null}));
+    points=(row?.hours||[]).map((h,i)=>({label:h.hour,value:Number(h.value||0),baseline:i===0,total:i===0?Number(h.value||0):null}));
   }
   const rawMax=Math.max(...points.map(p=>p.value),1),target=rawMax*1.18,magnitude=10**Math.floor(Math.log10(target)),normalized=target/magnitude;
   const scale=[1,2,2.5,5,10].find(step=>normalized<=step)*magnitude;
   document.querySelector('#axis').innerHTML=[scale,scale*.75,scale*.5,scale*.25,0].map(money).map(v=>`<span>${v}</span>`).join('');
-  document.querySelector('#hourlyChart').innerHTML=points.map((p,i)=>`<div class="bar-group ${i===points.length-1?'latest':''}"><div class="bar ${p.baseline?'projected':''}" style="height:${p.baseline?2:Math.max(2,p.value/scale*100)}%" data-value="${p.baseline?'Base inicial: '+fullMoney(p.total):fullMoney(p.value)}"></div><label>${p.label}</label></div>`).join('');
+  document.querySelector('#hourlyChart').innerHTML=points.map((p,i)=>`<div class="bar-group ${i===points.length-1?'latest':''}"><div class="bar ${p.baseline?'projected':''}" style="height:${Math.max(2,p.value/scale*100)}%" data-value="${p.baseline?'Carga inicial: '+fullMoney(p.value):fullMoney(p.value)}"></div><label>${p.label}</label></div>`).join('');
   const realized=points.filter(p=>!p.baseline),peak=realized.reduce((best,p)=>!best||p.value>best.value?p:best,null);
   document.querySelector('#peakLabel').textContent=peak?`Maior incremento: ${peak.label} • ${money(peak.value)}`:`Carga inicial registrada às ${points[0].label}; aguardando próximo intervalo`;
 }
