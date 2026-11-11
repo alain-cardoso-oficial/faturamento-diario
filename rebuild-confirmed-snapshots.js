@@ -42,7 +42,7 @@ for (const snapshot of snapshots) {
   for (const row of snapshot.analytics || []) {
     const detail = byOrder.get(`${row.empresa}:${row.pedido}`);
     if (detail) row.canal = channel(detail);
-    row.contabilizado = !/cancelad|exclu/i.test(String(row.situacao || ''));
+    row.contabilizado = !/cancelad|exclu/i.test(String(row.situacao || '')) && !/^em aberto$/i.test(String(row.situacao || '').trim());
     if (!row.contabilizado) continue;
     channels[row.canal] = (channels[row.canal] || 0) + Number(row.valor || 0);
     orders[row.canal] = (orders[row.canal] || 0) + 1;

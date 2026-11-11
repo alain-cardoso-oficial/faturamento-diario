@@ -77,7 +77,7 @@ async function getOrder(account, summary) {
 }
 const num = value => { const parsed = Number(String(value ?? 0).replace(',','.')); return Number.isFinite(parsed) ? parsed : 0; };
 const cancelled = order => /cancelad|exclu/i.test(String(order.situacao || ''));
-const countableSale = order => !cancelled(order);
+const countableSale = order => !cancelled(order) && !/^em aberto$/i.test(String(order.situacao || '').trim());
 function ecommerceName(order) {
   if (typeof order.ecommerce === 'string') return order.ecommerce.trim();
   return String(order.ecommerce?.nomeEcommerce || order.ecommerce?.canalVenda || order.nome_ecommerce || order.nomeEcommerce || '').trim();
