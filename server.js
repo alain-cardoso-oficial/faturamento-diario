@@ -10,7 +10,7 @@ const PORT = Number(process.env.PORT || 8787);
 const TZ = 'America/Sao_Paulo';
 const PESQUISA_ENDPOINT = 'https://api.tiny.com.br/api2/pedidos.pesquisa.php';
 const OBTER_ENDPOINT = 'https://api.tiny.com.br/api2/pedido.obter.php';
-const DETAILS_PER_ACCOUNT = 40;
+const DETAIL_DELAY_MS = Number(process.env.TINY_DETAIL_DELAY_MS || 1200);
 
 function loadEnv() {
   const file = path.join(ROOT, '.env.local');
@@ -70,10 +70,10 @@ async function searchOrders(account) {
 async function getOrder(account, summary) {
   const json = await tinyPost(OBTER_ENDPOINT, account.token, {id:String(summary.id)});
   const root = json?.retorno || {}, error = tinyError(root, `${account.empresa} pedido ${summary.id}`);
-  if (error === 'EMPTY') return summary;
+  if (error === 'EMPTY') return {...summary, _tinyDetail:false};
   if (error) throw error;
   const detail = root.pedido || summary;
-  return {...detail, valor:detail.valor || detail.total_pedido || detail.totalVenda || 0};
+  return {...detail, valor:detail.valor || detail.total_pedido || detail.totalVenda || 0, _tinyDetail:true};
 }
 const num = value => { const parsed = Number(String(value ?? 0).replace(',','.')); return Number.isFinite(parsed) ? parsed : 0; };
 const cancelled = order => /cancelad|exclu/i.test(String(order.situacao || ''));
@@ -137,13 +137,19 @@ function buildPayload(all) {
 }
 
 let updating = null;
+function hasFullDetail(order) {
+  return order?._tinyDetail === true || Array.isArray(order?.itens) || Object.prototype.hasOwnProperty.call(order || {}, 'total_pedido');
+}
 async function enrichAccount(account, cache, summaries) {
-  const uncached = summaries.filter(s => !cache[`${account.empresa}:${s.id}`]);
-  for (const summary of uncached.slice(0,DETAILS_PER_ACCOUNT)) {
+  const pending = summaries.filter(summary => !hasFullDetail(cache[`${account.empresa}:${summary.id}`]));
+  for (const summary of pending) {
     try {
-      cache[`${account.empresa}:${summary.id}`] = await getOrder(account, summary);
-      writeJson(DETAIL_CACHE, cache);
-      await new Promise(resolve => setTimeout(resolve, 1200));
+      const detail = await getOrder(account, summary);
+      if (hasFullDetail(detail)) {
+        cache[`${account.empresa}:${summary.id}`] = detail;
+        writeJson(DETAIL_CACHE, cache);
+      }
+      await new Promise(resolve => setTimeout(resolve, DETAIL_DELAY_MS));
     } catch (error) {
       if (!/Excedido o número de acessos/i.test(error.message)) throw error;
       break;
@@ -151,7 +157,7 @@ async function enrichAccount(account, cache, summaries) {
   }
   return summaries.map(summary => {
     const detail = cache[`${account.empresa}:${summary.id}`];
-    return {order:{...summary,...(detail || {})}, detailed:Boolean(detail)};
+    return {order:{...summary,...(detail || {})}, detailed:hasFullDetail(detail)};
   }).filter(item => !cancelled(item.order));
 }
 async function updateData() {
