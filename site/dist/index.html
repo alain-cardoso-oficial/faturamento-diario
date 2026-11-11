@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="theme-color" content="#090909" />
+  <title>Black Friday Oficial 2026 — Hora a Hora</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:ital,wght@0,600;0,700;0,800;0,900;1,800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="logos.css" />
+  <link rel="stylesheet" href="upgrade.css" />
+  <link rel="stylesheet" href="commercial.css" />
+  <link rel="stylesheet" href="analytics-tab.css" />
+</head>
+<body>
+  <div class="noise"></div>
+  <main class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <img src="assets/remada-black.png" alt="Logo Remada Black" />
+        <div><span class="eyebrow">PAINEL EXECUTIVO • AO VIVO</span><h1>BLACK FRIDAY <em>OFICIAL 2026</em></h1><p>HORA A HORA</p></div>
+      </div>
+      <div class="official-mark"><span>POWERED BY</span><img src="assets/oficial-logo.png" alt="Oficial Webshop"></div>
+      <div class="actions">
+        <label class="upload" title="Importar CSV"><input id="fileInput" type="file" accept=".csv,text/csv"/><span>↑</span> Importar base</label>
+        <button id="refreshBtn"><span class="refresh-icon">↻</span> Atualizar dados</button>
+        <div class="status"><i></i><div><small>ÚLTIMA ATUALIZAÇÃO</small><strong id="lastUpdate">—</strong></div></div>
+      </div>
+    </header>
+
+    <nav class="view-tabs" aria-label="Navegação do relatório"><button class="view-tab active" data-view="dashboardView">PAINEL EXECUTIVO</button><button class="view-tab" data-view="analyticsView">TABELA ANALÍTICA</button></nav>
+
+    <div id="dashboardView" class="report-view active">
+    <section class="hero-grid">
+      <article class="metric featured"><div class="metric-top"><span>GMV TOTAL</span><b>ACUMULADO</b></div><strong id="totalGMV">R$ 0</strong><div class="delta" id="totalDelta">▲ 0% vs. hora anterior</div><div class="spark" id="sparkline"></div></article>
+      <article class="metric"><div class="metric-top"><span>GMV ÚLTIMO SNAPSHOT</span><b id="currentHour">—</b></div><strong id="hourGMV">R$ 0</strong><div class="delta" id="hourDelta">▲ 0% vs. snapshot anterior</div><div class="progress"><i id="hourProgress"></i></div></article>
+      <article class="metric"><div class="metric-top"><span>CANAL LÍDER</span><b>#1</b></div><div class="leader"><div id="leaderIcon" class="channel-icon lg">?</div><div><strong id="leaderName">—</strong><small id="leaderShare">0% do GMV</small></div></div><div class="progress"><i id="leaderProgress"></i></div></article>
+      <article class="metric target"><div class="metric-top"><span>ATINGIMENTO DA META</span><b>R$ 671.585</b></div><strong id="targetValue">0%</strong><div class="target-bar"><i id="targetProgress"></i><span></span></div><small id="targetGap">Faltam R$ 671.585 para a meta</small></article>
+    </section>
+
+    <section class="monitor-grid" aria-label="Indicadores de monitoramento">
+      <article class="monitor-card"><div class="monitor-icon">▣</div><div><small>PEDIDOS DO DIA</small><strong id="ordersKpi">0</strong><span>Monitorando entrada</span></div></article>
+      <article class="monitor-card"><div class="monitor-icon">R$</div><div><small>TICKET MÉDIO</small><strong id="ticketKpi">R$ 0</strong><span>Valor médio por pedido</span></div></article>
+      <article class="monitor-card"><div class="monitor-icon">◉</div><div><small>CANAIS ATIVOS</small><strong id="activeKpi">0</strong><span id="activeLabel">Com venda no dia</span></div></article>
+      <article class="monitor-card"><div class="monitor-icon">◆</div><div><small>CONCENTRAÇÃO TOP 3</small><strong id="top3Kpi">0%</strong><span>Participação no GMV</span></div></article>
+      <article class="monitor-card pulse-card"><div class="monitor-icon">↗</div><div><small>RITMO DA OPERAÇÃO</small><strong id="paceKpi">Estável</strong><span id="paceLabel">Aguardando próxima hora</span></div></article>
+    </section>
+
+    <section class="content-grid">
+      <article class="panel ranking-panel">
+        <div class="panel-head"><div><span class="kicker">DISPUTA EM TEMPO REAL</span><h2>RANKING DE CANAIS</h2></div><div class="rank-meta"><span id="rankingPage">TOP CANAIS</span><div class="legend"><i></i> GMV acumulado</div></div></div>
+        <div id="ranking" class="ranking"></div>
+      </article>
+      <article class="panel hourly-panel">
+        <div class="panel-head"><div><span class="kicker">RITMO DE VENDAS</span><h2 id="chartTitle">PROJEÇÃO DO DIA</h2></div><select id="channelFilter" aria-label="Filtrar canal"><option value="all">Todos os canais</option></select></div>
+        <div class="chart-wrap"><div class="axis" id="axis"></div><div class="bars" id="hourlyChart"></div></div>
+        <div class="chart-summary"><span id="chartLegend"><i class="orange"></i> Projeção por faixa horária</span><strong id="peakLabel">Fechamento projetado: —</strong></div>
+      </article>
+    </section>
+    <section class="sales-ticker"><strong>PLACAR AO VIVO</strong><div class="ticker-window"><div id="tickerTrack" class="ticker-track">Carregando canais...</div></div></section>
+    <section class="insight-strip"><div><span class="live-dot"></span><strong>BLACK FRIDAY CONTROL ROOM</strong></div><p id="insightText">O monitor acompanha a distribuição de vendas entre os canais.</p><div class="clock" id="liveClock">--:--:--</div></section>
+    </div>
+    <section id="analyticsView" class="report-view analytics-view">
+      <div class="analytics-head"><div><span class="kicker">RAIO X OPERACIONAL</span><h2>TABELA ANALÍTICA DE PEDIDOS</h2><p>Conferência da origem, empresa, situação e valor de cada pedido capturado hoje.</p></div><div class="analytics-kpis"><span><small>PEDIDOS</small><b id="analyticOrders">0</b></span><span><small>GMV</small><b id="analyticGmv">R$ 0</b></span><span><small>DETALHES COMPLETOS</small><b id="analyticComplete">0%</b></span></div></div>
+      <div class="analytics-controls"><input id="analyticSearch" type="search" placeholder="Buscar pedido, canal ou e-commerce"><select id="analyticCompany"><option value="all">Todas as empresas</option><option>Oficial</option><option>Prioriza</option></select><select id="analyticChannel"><option value="all">Todos os canais</option></select></div>
+      <div class="analytics-table-wrap"><table class="analytics-table"><thead><tr><th>Pedido</th><th>Empresa</th><th>Canal padrão</th><th>E-commerce Tiny</th><th>Situação</th><th>Detalhe</th><th>Valor</th></tr></thead><tbody id="analyticsRows"></tbody></table></div>
+    </section>
+    <footer><span>BLACK FRIDAY OFICIAL 2026</span><p>Fonte oficial • Tiny API Oficial + Prioriza • AUTO 30 MIN</p><div>REMADA BLACK <b>● AO VIVO</b></div></footer>
+  </main>
+  <div id="toast" role="status"></div>
+  <script src="app.js"></script>
+</body>
+</html>

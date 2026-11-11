@@ -1,0 +1,5 @@
+.env.local
+data/hourly-snapshots.json
+data/tiny-order-cache.json
+node_modules/
+*.tmp

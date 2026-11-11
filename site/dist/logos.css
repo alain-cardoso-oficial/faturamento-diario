@@ -1,0 +1,3 @@
+.channel-icon { overflow: hidden; }
+.channel-icon img { width: 25px; height: 25px; object-fit: contain; }
+.channel-icon.lg img { width: 31px; height: 31px; }

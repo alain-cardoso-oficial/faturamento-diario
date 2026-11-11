@@ -1,0 +1,12 @@
+{
+  "name": "black-friday-oficial-2026",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@google-cloud/bigquery": "^8.3.1",
+    "simple-icons": "^16.36.0"
+  }
+}
