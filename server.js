@@ -144,6 +144,13 @@ let reconciliationState = {status:'ok', pending:0, message:''};
 function hasFullDetail(order) {
   return order?._tinyDetail === true || Array.isArray(order?.itens) || Object.prototype.hasOwnProperty.call(order || {}, 'total_pedido');
 }
+function mergeCurrentOrder(summary, detail) {
+  const order = {...summary, ...(detail || {})};
+  for (const field of ['id','numero','situacao','valor','total_pedido','data_pedido','data_prevista']) {
+    if (summary?.[field] !== undefined && summary[field] !== null && summary[field] !== '') order[field] = summary[field];
+  }
+  return order;
+}
 async function enrichAccount(account, cache, summaries) {
   const pending = summaries.filter(summary => !hasFullDetail(cache[`${account.empresa}:${summary.id}`]));
   for (const summary of pending) {
@@ -168,7 +175,7 @@ async function enrichAccount(account, cache, summaries) {
   }
   return summaries.map(summary => {
     const detail = cache[`${account.empresa}:${summary.id}`];
-    return {order:{...summary,...(detail || {})}, detailed:hasFullDetail(detail)};
+    return {order:mergeCurrentOrder(summary, detail), detailed:hasFullDetail(detail)};
   }).filter(item => !cancelled(item.order));
 }
 async function updateData() {
