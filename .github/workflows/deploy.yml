@@ -1,0 +1,27 @@
+name: Deploy to VPS
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Deploy bi-vendas to VPS
+    runs-on: ubuntu-latest
+    steps:
+      - name: Executar Deploy na VPS via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USERNAME }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          script: |
+            set -e
+            cd /var/www/faturamento-diario
+            git pull origin main
+            npm ci --omit=dev
+            pm2 reload bi-vendas || pm2 restart ecosystem.config.cjs
+            pm2 status bi-vendas
