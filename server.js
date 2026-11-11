@@ -77,7 +77,7 @@ async function getOrder(account, summary) {
 }
 const num = value => { const parsed = Number(String(value ?? 0).replace(',','.')); return Number.isFinite(parsed) ? parsed : 0; };
 const cancelled = order => /cancelad|exclu/i.test(String(order.situacao || ''));
-const countableSale = order => !cancelled(order) && !/^em aberto$/i.test(String(order.situacao || '').trim());
+const countableSale = order => !cancelled(order);
 function ecommerceName(order) {
   if (typeof order.ecommerce === 'string') return order.ecommerce.trim();
   return String(order.ecommerce?.nomeEcommerce || order.ecommerce?.canalVenda || order.nome_ecommerce || order.nomeEcommerce || '').trim();
@@ -228,4 +228,4 @@ function schedule() {
 }
 function json(res,code,body){res.writeHead(code,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});res.end(JSON.stringify(body));}
 function serve(req,res){const url=new URL(req.url,'http://localhost'),file=url.pathname==='/'?'index.html':decodeURIComponent(url.pathname.slice(1)),target=path.resolve(PUBLIC,file);if(!target.startsWith(path.resolve(PUBLIC)))return json(res,403,{error:'Acesso negado'});fs.readFile(target,(error,data)=>{if(error)return json(res,404,{error:'Não encontrado'});const type={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.png':'image/png'}[path.extname(target)]||'application/octet-stream';res.writeHead(200,{'Content-Type':type,'Cache-Control':'no-store'});res.end(data);});}
-http.createServer(async(req,res)=>{const url=new URL(req.url,'http://localhost');if(url.pathname==='/api/update-data'){try{return json(res,200,{...await updateData(),reconciliation:reconciliationState})}catch(error){console.error(error);return json(res,500,{error:error.message,reconciliation:reconciliationState})}}if(url.pathname==='/api/data')return json(res,200,{...buildPayload(readJson(SNAPSHOTS,[])),updating:Boolean(updating),reconciliation:reconciliationState});serve(req,res);}).listen(PORT,()=>{console.log(`Black Friday BI Tiny: http://localhost:${PORT}`);if(process.env.DISABLE_AUTO_UPDATE!=='1')schedule();});
+http.createServer(async(req,res)=>{const url=new URL(req.url,'http://localhost');if(url.pathname==='/api/update-data'){if(process.env.READ_ONLY_PREVIEW==='1')return json(res,409,{error:'Prévia local protegida: atualização da API desativada'});try{return json(res,200,{...await updateData(),reconciliation:reconciliationState})}catch(error){console.error(error);return json(res,500,{error:error.message,reconciliation:reconciliationState})}}if(url.pathname==='/api/data')return json(res,200,{...buildPayload(readJson(SNAPSHOTS,[])),updating:Boolean(updating),reconciliation:reconciliationState});serve(req,res);}).listen(PORT,()=>{console.log(`Black Friday BI Tiny: http://localhost:${PORT}`);if(process.env.DISABLE_AUTO_UPDATE!=='1')schedule();});
