@@ -14,12 +14,15 @@ function ecommerceName(order) {
   if (typeof order.ecommerce === 'string') return order.ecommerce.trim();
   return String(order.ecommerce?.nomeEcommerce || order.ecommerce?.canalVenda || order.nome_ecommerce || order.nomeEcommerce || '').trim();
 }
+function sellerName(order) {
+  return String(order.nome_vendedor || order.nomeVendedor || order.vendedor?.nome || order.vendedor?.nomeVendedor || '').trim();
+}
 
 function channel(order) {
-  const seller = String(order.nome_vendedor || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().replace(/\s+/g, ' ').toUpperCase();
-  if (/^(GABRIEL BARBOSA|CAMILA WALESKO|ANDREIA OTTO)$/.test(seller)) return 'Vendas Diretas';
+  const seller = sellerName(order).normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().replace(/\s+/g, ' ').toUpperCase();
+  if (/^(GABRIEL BARBOSA|CAMILA WALESKO|ANDREIA OTTO|ISABEL LARA)$/.test(seller)) return 'Vendas Diretas';
   const markers = (order.marcadores || []).map(x => x?.marcador?.descricao || x?.descricao || '').join(' ');
-  const raw = [ecommerceName(order), order.intermediador?.nome, order.nome_vendedor, order.forma_pagamento, order.obs, order.observacoes, order.obs_interna, markers, order.forma_envio].filter(Boolean).join(' ').toUpperCase();
+  const raw = [ecommerceName(order), order.intermediador?.nome, sellerName(order), order.forma_pagamento, order.obs, order.observacoes, order.obs_interna, markers, order.forma_envio].filter(Boolean).join(' ').toUpperCase();
   if (/TRAY/.test(raw)) return 'Site';
   if (/MERCADO\s*LIVRE|\bMELI\b/.test(raw)) return 'Meli';
   if (/SHOPEE/.test(raw)) return 'Shopee';

@@ -6,7 +6,7 @@ Dashboard conectado diretamente às APIs de pedidos do Tiny das operações Ofic
 
 Clique duas vezes em `iniciar-dashboard.cmd` ou execute `npm start`.
 
-O servidor pesquisa somente os pedidos do dia nos dois ambientes, consulta o detalhe de cada pedido, exclui cancelados, normaliza o canal e registra um snapshot acumulado a cada meia hora. O gráfico calcula o movimento de cada janela pela diferença entre snapshots.
+O servidor pesquisa somente os pedidos do dia nos dois ambientes, consulta o detalhe de cada pedido, exclui pedidos cancelados, excluídos e em aberto, normaliza o canal e registra um snapshot acumulado a cada meia hora. O gráfico calcula o movimento de cada janela pela diferença entre snapshots.
 
 Os tokens ficam apenas em `.env.local`, ignorado pelo Git. O histórico local fica em `data/hourly-snapshots.json` e também é ignorado.
 
