@@ -7,6 +7,8 @@
     root.ORDER_CLASSIFIER = api;
   }
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
+  const TZ = 'America/Sao_Paulo';
+
   const COMPANY_CONFIGS = Object.freeze([
     Object.freeze({
       empresa: 'Oficial',
@@ -53,6 +55,73 @@
       token: env && env[cfg.envKey] ? String(env[cfg.envKey]).trim() : '',
       requiredMarkers: [...cfg.requiredMarkers]
     }));
+  }
+
+  /**
+   * Format a Date/timestamp as 'dd/mm/yyyy hh:mm:ss' in America/Sao_Paulo for Tiny dataAtualizacao.
+   */
+  function formatTinyDateTimeBrt(value = new Date(), timeZone = TZ) {
+    const date = value instanceof Date ? value : new Date(value);
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+      hourCycle: 'h23'
+    }).formatToParts(date);
+    const map = {};
+    for (const part of parts) map[part.type] = part.value;
+    const hour = map.hour === '24' ? '00' : map.hour;
+    return `${map.day}/${map.month}/${map.year} ${hour}:${map.minute}:${map.second}`;
+  }
+
+  /**
+   * Compute the reference Date for Tiny dataAtualizacao using the account watermark (with safety overlap)
+   * and a minimum rolling lookback window (default 180s = 3 minutes).
+   */
+  function computeIncrementalSinceDate({
+    watermarkIso,
+    nowMs = Date.now(),
+    windowSec = 180,
+    overlapSec = 30
+  } = {}) {
+    const windowFloorMs = nowMs - Math.max(1, Number(windowSec || 180)) * 1000;
+    const overlapMs = Math.max(0, Number(overlapSec ?? 30)) * 1000;
+    if (watermarkIso) {
+      const parsed = Date.parse(watermarkIso);
+      if (Number.isFinite(parsed)) {
+        return new Date(Math.min(parsed - overlapMs, windowFloorMs));
+      }
+    }
+    return new Date(windowFloorMs);
+  }
+
+  /**
+   * Normalize a DD/MM/YYYY or YYYY-MM-DD date string to YYYY-MM-DD, or null when absent/unrecognized.
+   */
+  function normalizeOrderDateIso(rawDate) {
+    const text = String(rawDate || '').trim();
+    if (!text) return null;
+    const br = text.match(/^(\d{2})\/(\d{2})\/(\d{4})/);
+    if (br) return `${br[3]}-${br[2]}-${br[1]}`;
+    const iso = text.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
+    return null;
+  }
+
+  /**
+   * Check whether an order belongs to the target ISO date (YYYY-MM-DD).
+   * Orders without an explicit data_pedido field default to true so synthetic fixtures remain compatible.
+   */
+  function isOrderFromDate(order, targetIsoDate) {
+    const targetIso = normalizeOrderDateIso(targetIsoDate);
+    const orderIso = normalizeOrderDateIso(order?.data_pedido || order?.dataPedido);
+    if (!orderIso || !targetIso) return true;
+    return orderIso === targetIso;
   }
 
   function num(value) {
@@ -254,11 +323,16 @@
   }
 
   return {
+    TZ,
     COMPANY_CONFIGS,
     KNOWN_COMPANIES,
     normalizeText,
     getCompanyConfig,
     buildAccounts,
+    formatTinyDateTimeBrt,
+    computeIncrementalSinceDate,
+    normalizeOrderDateIso,
+    isOrderFromDate,
     num,
     cancelled,
     countableSale,
@@ -273,4 +347,3 @@
     analyticRow
   };
 });
-

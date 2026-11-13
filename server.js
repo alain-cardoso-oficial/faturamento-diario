@@ -11,7 +11,10 @@ const {
   shouldIncludeOrder,
   channel,
   orderValue,
-  analyticRow
+  analyticRow,
+  formatTinyDateTimeBrt,
+  computeIncrementalSinceDate,
+  isOrderFromDate
 } = require('./site/dist/order-classifier.js');
 
 const ROOT = __dirname;
@@ -35,6 +38,7 @@ loadEnv();
 
 const SNAPSHOTS = process.env.SNAPSHOTS_FILE || path.join(ROOT, 'data', 'hourly-snapshots.json');
 const DETAIL_CACHE = process.env.DETAIL_CACHE_FILE || path.join(ROOT, 'data', 'tiny-order-cache.json');
+const DAILY_STATE_FILE = process.env.DAILY_STATE_FILE || path.join(path.dirname(SNAPSHOTS), 'daily-orders-state.json');
 const PORT = Number(process.env.PORT || 8787);
 const TZ = 'America/Sao_Paulo';
 const PESQUISA_ENDPOINT = process.env.TINY_PESQUISA_ENDPOINT || 'https://api.tiny.com.br/api2/pedidos.pesquisa.php';
@@ -43,6 +47,10 @@ const DETAIL_DELAY_MS = Number(process.env.TINY_DETAIL_DELAY_MS || 1200);
 const RETRY_BASE_MS = Number(process.env.TINY_RETRY_BASE_MS || 5000);
 const RETRY_MAX_MS = Number(process.env.TINY_RETRY_MAX_MS || 300000);
 const RETRY_MAX_ATTEMPTS = Number(process.env.TINY_RETRY_MAX_ATTEMPTS || 6);
+const INCREMENTAL_INTERVAL_MS = Number(process.env.TINY_INCREMENTAL_INTERVAL_MS || 180000);
+const INCREMENTAL_WINDOW_SEC = Number(process.env.TINY_INCREMENTAL_WINDOW_SEC || 180);
+const INCREMENTAL_OVERLAP_SEC = Number(process.env.TINY_INCREMENTAL_OVERLAP_SEC ?? 30);
+const FULL_RECONCILE_INTERVAL_MS = Number(process.env.TINY_FULL_RECONCILE_INTERVAL_MS ?? 3600000);
 const SOURCE_LABEL = 'Tiny API Oficial + Prioriza + OFICIALSP + OFICIALSP2';
 
 const accounts = buildAccounts(process.env);
@@ -55,15 +63,66 @@ function readJson(file, fallback) { try { return JSON.parse(fs.readFileSync(file
 function writeJson(file, value) { fs.mkdirSync(path.dirname(file), { recursive: true }); const tmp = `${file}.tmp`; fs.writeFileSync(tmp, JSON.stringify(value, null, 2)); fs.renameSync(tmp, file); }
 function readDetailCache() { const cache = readJson(DETAIL_CACHE, {}); for (const item of Object.values(cache)) item.valor = item.valor || item.total_pedido || item.totalVenda || 0; return cache; }
 
+function createEmptyDailyState(dataDate = brDate()) {
+  return {
+    dataDate,
+    bootstrapped: false,
+    lastFullReconcileAt: null,
+    lastIncrementalAt: null,
+    watermarks: {},
+    lastSinceByAccount: {},
+    ordersByAccount: {}
+  };
+}
+
+function readDailyState(today = brDate()) {
+  const raw = readJson(DAILY_STATE_FILE, null);
+  if (!raw || typeof raw !== 'object' || raw.dataDate !== today) {
+    return createEmptyDailyState(today);
+  }
+  return {
+    dataDate: today,
+    bootstrapped: Boolean(raw.bootstrapped),
+    lastFullReconcileAt: raw.lastFullReconcileAt || null,
+    lastIncrementalAt: raw.lastIncrementalAt || null,
+    watermarks: raw.watermarks && typeof raw.watermarks === 'object' ? { ...raw.watermarks } : {},
+    lastSinceByAccount: raw.lastSinceByAccount && typeof raw.lastSinceByAccount === 'object' ? { ...raw.lastSinceByAccount } : {},
+    ordersByAccount: raw.ordersByAccount && typeof raw.ordersByAccount === 'object' ? raw.ordersByAccount : {}
+  };
+}
+
+function writeDailyState(state) {
+  writeJson(DAILY_STATE_FILE, state);
+}
+
+function resolveSyncMode(requestedMode, dailyState, nowMs = Date.now(), today = brDate()) {
+  if (!dailyState?.bootstrapped || dailyState.dataDate !== today) {
+    return 'bootstrap';
+  }
+  if (requestedMode === 'full') return 'full';
+  if (requestedMode === 'incremental') return 'incremental';
+  if (FULL_RECONCILE_INTERVAL_MS > 0) {
+    const lastFullMs = dailyState.lastFullReconcileAt ? Date.parse(dailyState.lastFullReconcileAt) : NaN;
+    if (!Number.isFinite(lastFullMs) || (nowMs - lastFullMs) >= FULL_RECONCILE_INTERVAL_MS) {
+      return 'full';
+    }
+  }
+  return 'incremental';
+}
+
 let updating = null;
 let recoveryTimer = null;
 let cancelActiveDelay = null;
 let reconciliationState = { status: 'ok', pending: 0, message: '' };
 let cycleDate = null;
+let activeCycleMode = null;
 const cycleCompletedByEmpresa = new Map();
+
+const initialDailyState = readDailyState();
 
 const syncQueue = {
   status: 'idle',
+  mode: initialDailyState.bootstrapped ? 'incremental' : 'bootstrap',
   paused: false,
   pausedAt: null,
   pausedReason: null,
@@ -74,15 +133,23 @@ const syncQueue = {
   lastError: null,
   startedAt: null,
   updatedAt: null,
+  lastIncrementalAt: initialDailyState.lastIncrementalAt,
+  lastFullReconcileAt: initialDailyState.lastFullReconcileAt,
+  incrementalIntervalMs: INCREMENTAL_INTERVAL_MS,
+  fullReconcileIntervalMs: FULL_RECONCILE_INTERVAL_MS,
   currentTask: null,
   accounts: accounts.map(acc => ({
     empresa: acc.empresa,
     requiredMarkers: [...acc.requiredMarkers],
     status: 'idle',
     foundOrders: 0,
+    changedOrders: 0,
+    activeOrders: Object.keys(initialDailyState.ordersByAccount?.[acc.empresa] || {}).length,
     pendingOrders: 0,
     processedOrders: 0,
     pendingOrderIds: [],
+    lastSyncAt: initialDailyState.watermarks?.[acc.empresa] || null,
+    lastSince: initialDailyState.lastSinceByAccount?.[acc.empresa] || null,
     lastError: null
   }))
 };
@@ -98,6 +165,7 @@ function getTotalPending() {
 function getQueueSnapshot() {
   return {
     status: syncQueue.status,
+    mode: syncQueue.mode,
     paused: syncQueue.paused,
     pausedAt: syncQueue.pausedAt,
     pausedReason: syncQueue.pausedReason,
@@ -108,6 +176,10 @@ function getQueueSnapshot() {
     lastError: syncQueue.lastError,
     startedAt: syncQueue.startedAt,
     updatedAt: syncQueue.updatedAt,
+    lastIncrementalAt: syncQueue.lastIncrementalAt,
+    lastFullReconcileAt: syncQueue.lastFullReconcileAt,
+    incrementalIntervalMs: syncQueue.incrementalIntervalMs,
+    fullReconcileIntervalMs: syncQueue.fullReconcileIntervalMs,
     currentTask: syncQueue.currentTask ? { ...syncQueue.currentTask } : null,
     pendingTotal: getTotalPending(),
     accounts: syncQueue.accounts.map(acc => ({
@@ -115,9 +187,13 @@ function getQueueSnapshot() {
       requiredMarkers: [...acc.requiredMarkers],
       status: acc.status,
       foundOrders: acc.foundOrders,
+      changedOrders: acc.changedOrders,
+      activeOrders: acc.activeOrders,
       pendingOrders: acc.pendingOrders,
       processedOrders: acc.processedOrders,
       pendingOrderIds: [...acc.pendingOrderIds],
+      lastSyncAt: acc.lastSyncAt,
+      lastSince: acc.lastSince,
       lastError: acc.lastError
     }))
   };
@@ -203,7 +279,7 @@ function resumeQueue({ triggerNow = true } = {}) {
     message: 'Fila retomada'
   };
   if (triggerNow && !updating && process.env.READ_ONLY_PREVIEW !== '1') {
-    updateData().catch(error => console.error(`Retomada da fila: ${error.message}`));
+    updateData({ mode: 'auto' }).catch(error => console.error(`Retomada da fila: ${error.message}`));
   }
   return getQueueSnapshot();
 }
@@ -228,17 +304,17 @@ async function tinyPost(endpoint, token, params = {}) {
   return response.json();
 }
 
-async function searchOrdersByQuery(account, extraParams = {}) {
-  const date = apiDate(), found = [];
+async function searchOrdersByQuery(account, extraParams = {}, options = {}) {
+  const isIncremental = options.mode === 'incremental' && Boolean(options.dataAtualizacao);
+  const date = options.date || apiDate();
+  const found = [];
   let page = 1, pages = 1;
   do {
     ensureNotPaused();
-    const json = await tinyPost(PESQUISA_ENDPOINT, account.token, {
-      dataInicial: date,
-      dataFinal: date,
-      pagina: String(page),
-      ...extraParams
-    });
+    const queryParams = isIncremental
+      ? { dataAtualizacao: String(options.dataAtualizacao), pagina: String(page), ...extraParams }
+      : { dataInicial: date, dataFinal: date, pagina: String(page), ...extraParams };
+    const json = await tinyPost(PESQUISA_ENDPOINT, account.token, queryParams);
     const root = json?.retorno || {}, error = tinyError(root, `${account.empresa} pesquisa`);
     if (error === 'EMPTY') return found;
     if (error) throw error;
@@ -249,7 +325,7 @@ async function searchOrdersByQuery(account, extraParams = {}) {
   return found;
 }
 
-async function searchOrders(account) {
+async function searchOrders(account, options = {}) {
   ensureNotPaused();
   if (!account.token) {
     const error = new Error(`Token Tiny não configurado para ${account.empresa}`);
@@ -259,7 +335,7 @@ async function searchOrders(account) {
   if (Array.isArray(account.requiredMarkers) && account.requiredMarkers.length > 0) {
     const byId = new Map();
     for (const marker of account.requiredMarkers) {
-      const orders = await searchOrdersByQuery(account, { marcador: marker });
+      const orders = await searchOrdersByQuery(account, { marcador: marker }, options);
       for (const order of orders) {
         const key = String(order.id || order.numero || '');
         if (key && !byId.has(key)) byId.set(key, order);
@@ -267,7 +343,7 @@ async function searchOrders(account) {
     }
     return [...byId.values()];
   }
-  return searchOrdersByQuery(account);
+  return searchOrdersByQuery(account, {}, options);
 }
 
 async function getOrder(account, summary) {
@@ -353,9 +429,9 @@ function mergeCurrentOrder(summary, detail) {
   return order;
 }
 
-async function enrichAccount(account, cache, summaries) {
+async function enrichAccount(account, cache, summaries, { forceRefresh = false } = {}) {
   const qAcc = getAccountQueueEntry(account.empresa);
-  const pending = summaries.filter(summary => !hasUsableCache(account, cache[`${account.empresa}:${summary.id}`]));
+  const pending = summaries.filter(summary => forceRefresh || !hasUsableCache(account, cache[`${account.empresa}:${summary.id}`]));
   if (qAcc) {
     qAcc.status = pending.length ? 'enriching' : 'completed';
     qAcc.foundOrders = summaries.length;
@@ -371,6 +447,7 @@ async function enrichAccount(account, cache, summaries) {
       : `Conferindo pedidos de ${account.empresa}`
   };
 
+  let cacheDirty = false;
   for (let i = 0; i < pending.length; i++) {
     ensureNotPaused();
     const summary = pending[i];
@@ -384,7 +461,7 @@ async function enrichAccount(account, cache, summaries) {
       const detail = await getOrder(account, summary);
       if (hasFullDetail(detail)) {
         cache[`${account.empresa}:${summary.id}`] = detail;
-        writeJson(DETAIL_CACHE, cache);
+        cacheDirty = true;
         if (qAcc) {
           qAcc.processedOrders += 1;
           qAcc.pendingOrders = Math.max(0, qAcc.pendingOrders - 1);
@@ -396,11 +473,13 @@ async function enrichAccount(account, cache, summaries) {
         await interruptibleDelay(DETAIL_DELAY_MS);
       }
     } catch (error) {
+      if (cacheDirty) writeJson(DETAIL_CACHE, cache);
       if (error.code === 'QUEUE_PAUSED') throw error;
       if (!/Excedido o número de acessos/i.test(error.message)) throw error;
       break;
     }
   }
+  if (cacheDirty) writeJson(DETAIL_CACHE, cache);
 
   ensureNotPaused();
   const unresolved = summaries.filter(summary => countableSale(summary) && !hasFullDetail(cache[`${account.empresa}:${summary.id}`]));
@@ -431,7 +510,7 @@ async function enrichAccount(account, cache, summaries) {
     .filter(item => !cancelled(item.order) && shouldIncludeOrder(item.order, account.empresa));
 }
 
-async function updateData() {
+async function updateData({ mode: requestedMode = 'auto' } = {}) {
   ensureNotPaused();
   if (updating) return updating;
 
@@ -441,12 +520,26 @@ async function updateData() {
   }
 
   const today = brDate();
+  const dailyState = readDailyState(today);
   if (cycleDate !== today) {
     cycleDate = today;
+    activeCycleMode = null;
     cycleCompletedByEmpresa.clear();
   }
 
+  let effectiveMode;
+  if (cycleCompletedByEmpresa.size > 0 && activeCycleMode && (requestedMode === 'auto' || requestedMode === activeCycleMode)) {
+    effectiveMode = activeCycleMode;
+  } else {
+    effectiveMode = resolveSyncMode(requestedMode, dailyState, Date.now(), today);
+    if (effectiveMode !== activeCycleMode) {
+      cycleCompletedByEmpresa.clear();
+      activeCycleMode = effectiveMode;
+    }
+  }
+
   syncQueue.status = 'running';
+  syncQueue.mode = effectiveMode;
   syncQueue.startedAt = new Date().toISOString();
   syncQueue.updatedAt = syncQueue.startedAt;
   syncQueue.nextRetryAt = null;
@@ -461,12 +554,13 @@ async function updateData() {
   reconciliationState = {
     status: 'updating',
     pending: getTotalPending(),
-    message: 'Conferindo todos os pedidos do dia'
+    message: effectiveMode === 'incremental'
+      ? 'Sincronizando alterações recentes (janela 3 min)'
+      : 'Conferindo todos os pedidos do dia'
   };
 
   updating = (async () => {
     const cache = readDetailCache();
-    const results = [];
     let activeAccount = null;
 
     try {
@@ -476,23 +570,109 @@ async function updateData() {
         const qAcc = getAccountQueueEntry(account.empresa);
 
         if (cycleCompletedByEmpresa.has(account.empresa)) {
-          results.push(cycleCompletedByEmpresa.get(account.empresa));
           if (qAcc) qAcc.status = 'completed';
           continue;
+        }
+
+        const accountWatermark = dailyState.watermarks?.[account.empresa] || null;
+        const accountMode = (effectiveMode === 'incremental' && accountWatermark) ? 'incremental' : (effectiveMode === 'bootstrap' ? 'bootstrap' : 'full');
+        const queryStartedIso = new Date().toISOString();
+        let dataAtualizacao = null;
+
+        if (accountMode === 'incremental') {
+          const sinceDate = computeIncrementalSinceDate({
+            watermarkIso: accountWatermark,
+            nowMs: Date.parse(queryStartedIso),
+            windowSec: INCREMENTAL_WINDOW_SEC,
+            overlapSec: INCREMENTAL_OVERLAP_SEC
+          });
+          dataAtualizacao = formatTinyDateTimeBrt(sinceDate);
         }
 
         if (qAcc) {
           qAcc.status = 'searching';
           qAcc.lastError = null;
+          qAcc.lastSince = dataAtualizacao;
         }
-        syncQueue.currentTask = { empresa: account.empresa, stage: 'pesquisa', pedidoId: null };
+        syncQueue.currentTask = {
+          empresa: account.empresa,
+          stage: 'pesquisa',
+          mode: accountMode,
+          dataAtualizacao,
+          pedidoId: null
+        };
         syncQueue.updatedAt = new Date().toISOString();
 
-        const summaries = await searchOrders(account);
-        const items = await enrichAccount(account, cache, summaries);
-        const entry = { account, items };
-        cycleCompletedByEmpresa.set(account.empresa, entry);
-        results.push(entry);
+        const rawSummaries = await searchOrders(account, {
+          mode: accountMode === 'incremental' ? 'incremental' : 'full',
+          dataAtualizacao
+        });
+
+        const existingAccountOrders = (
+          dailyState.ordersByAccount[account.empresa] &&
+          typeof dailyState.ordersByAccount[account.empresa] === 'object'
+        )
+          ? { ...dailyState.ordersByAccount[account.empresa] }
+          : {};
+
+        if (accountMode === 'incremental') {
+          // Descarta pedidos de dias anteriores antes mesmo de consultar pedido.obter.php
+          for (const summary of rawSummaries) {
+            const key = String(summary.id || summary.numero || '');
+            if (key && !isOrderFromDate(summary, today)) {
+              delete existingAccountOrders[key];
+            }
+          }
+          const relevantSummaries = rawSummaries.filter(s => isOrderFromDate(s, today));
+          if (qAcc) qAcc.changedOrders = relevantSummaries.length;
+
+          await enrichAccount(account, cache, relevantSummaries, { forceRefresh: true });
+
+          for (const summary of relevantSummaries) {
+            const key = String(summary.id || summary.numero || '');
+            if (!key) continue;
+            const detail = cache[`${account.empresa}:${summary.id}`];
+            const merged = mergeCurrentOrder(summary, detail);
+            const detailed = hasFullDetail(detail);
+            if (isOrderFromDate(merged, today) && !cancelled(merged) && shouldIncludeOrder(merged, account.empresa)) {
+              existingAccountOrders[key] = { order: merged, detailed };
+            } else {
+              delete existingAccountOrders[key];
+            }
+          }
+
+          dailyState.ordersByAccount[account.empresa] = existingAccountOrders;
+        } else {
+          const todaySummaries = rawSummaries.filter(s => isOrderFromDate(s, today));
+          if (qAcc) qAcc.changedOrders = todaySummaries.length;
+
+          await enrichAccount(account, cache, todaySummaries, { forceRefresh: false });
+
+          const nextAccountOrders = {};
+          for (const summary of todaySummaries) {
+            const key = String(summary.id || summary.numero || '');
+            if (!key) continue;
+            const detail = cache[`${account.empresa}:${summary.id}`];
+            const merged = mergeCurrentOrder(summary, detail);
+            const detailed = hasFullDetail(detail);
+            if (isOrderFromDate(merged, today) && !cancelled(merged) && shouldIncludeOrder(merged, account.empresa)) {
+              nextAccountOrders[key] = { order: merged, detailed };
+            }
+          }
+          dailyState.ordersByAccount[account.empresa] = nextAccountOrders;
+        }
+
+        dailyState.watermarks[account.empresa] = queryStartedIso;
+        dailyState.lastSinceByAccount[account.empresa] = dataAtualizacao;
+        writeDailyState(dailyState);
+
+        if (qAcc) {
+          qAcc.lastSyncAt = queryStartedIso;
+          qAcc.lastSince = dataAtualizacao;
+          qAcc.activeOrders = Object.keys(dailyState.ordersByAccount[account.empresa] || {}).length;
+        }
+
+        cycleCompletedByEmpresa.set(account.empresa, true);
       }
     } catch (error) {
       if (activeAccount) {
@@ -505,9 +685,25 @@ async function updateData() {
       throw error;
     }
 
-    writeJson(DETAIL_CACHE, cache);
+    const now = new Date().toISOString();
+    const currentDay = brDate(now);
+    const slot = slotKey(now);
+
+    if (effectiveMode === 'bootstrap' || effectiveMode === 'full') {
+      dailyState.bootstrapped = true;
+      dailyState.lastFullReconcileAt = now;
+      syncQueue.lastFullReconcileAt = now;
+    }
+    dailyState.lastIncrementalAt = now;
+    syncQueue.lastIncrementalAt = now;
+    writeDailyState(dailyState);
+
     const channels = {}, orders = {}, business = [], analytics = [], accountStatus = [];
-    for (const { account, items } of results) {
+    for (const account of accounts) {
+      const accountMap = dailyState.ordersByAccount[account.empresa] || {};
+      const items = Object.values(accountMap).filter(
+        item => item?.order && isOrderFromDate(item.order, currentDay) && !cancelled(item.order) && shouldIncludeOrder(item.order, account.empresa)
+      );
       accountStatus.push({ empresa: account.empresa, pedidos: items.length });
       const company = {};
       for (const item of items) {
@@ -528,16 +724,21 @@ async function updateData() {
       }
     }
     analytics.sort((a, b) => b.valor - a.valor);
-    const now = new Date().toISOString(), currentDay = brDate(now), slot = slotKey(now);
+
     let snapshots = readJson(SNAPSHOTS, []).filter(s => s.dataDate === currentDay);
     const snapshot = { at: now, dataDate: currentDay, slot, channels, orders, business, analytics, accounts: accountStatus };
     const existing = snapshots.findIndex(s => (s.slot || slotKey(s.at)) === slot);
     if (existing >= 0) snapshots[existing] = snapshot; else snapshots.push(snapshot);
     snapshots = snapshots.sort((a, b) => new Date(a.at) - new Date(b.at)).slice(-48);
+    for (let i = 0; i < snapshots.length - 1; i++) {
+      if (snapshots[i].analytics) delete snapshots[i].analytics;
+    }
     writeJson(SNAPSHOTS, snapshots);
 
     cycleCompletedByEmpresa.clear();
+    activeCycleMode = null;
     syncQueue.status = 'idle';
+    syncQueue.mode = 'incremental';
     syncQueue.attempt = 0;
     syncQueue.lastError = null;
     syncQueue.backoffMs = null;
@@ -612,7 +813,7 @@ function queueRecovery(delayMs = RETRY_BASE_MS) {
     recoveryTimer = null;
     if (syncQueue.paused) return;
     try {
-      await updateData();
+      await updateData({ mode: activeCycleMode || 'auto' });
       console.log('Reconciliação automática concluída');
     } catch (error) {
       console.error(`Reconciliação automática: ${error.message}`);
@@ -622,18 +823,18 @@ function queueRecovery(delayMs = RETRY_BASE_MS) {
 }
 
 function schedule() {
-  const now = new Date(), delay = (30 - now.getMinutes() % 30) * 60000 - now.getSeconds() * 1000 - now.getMilliseconds() + 2000;
+  const delay = Math.max(2000, INCREMENTAL_INTERVAL_MS);
   setTimeout(async () => {
-    if (!syncQueue.paused) {
+    if (!syncQueue.paused && process.env.READ_ONLY_PREVIEW !== '1') {
       try {
-        await updateData();
-        console.log(`Snapshot Tiny atualizado: ${brHour(new Date())}`);
+        await updateData({ mode: 'auto' });
+        console.log(`Snapshot Tiny atualizado (${syncQueue.mode}): ${brHour(new Date())}`);
       } catch (error) {
         console.error(`Atualização Tiny: ${error.message}`);
       }
     }
     schedule();
-  }, Math.max(delay, 2000));
+  }, delay);
 }
 
 function readRequestBody(req) {
@@ -726,9 +927,11 @@ http.createServer(async (req, res) => {
         queue: getQueueSnapshot()
       });
     }
+    const body = req.method === 'POST' ? await readRequestBody(req) : {};
+    const requestedMode = url.searchParams.get('mode') || body.mode || 'auto';
     try {
       return json(res, 200, {
-        ...await updateData(),
+        ...await updateData({ mode: requestedMode }),
         reconciliation: reconciliationState,
         queue: getQueueSnapshot()
       });

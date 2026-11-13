@@ -36,6 +36,7 @@
         <div><span class="kicker">CONTROLE DE COLETA TINY</span><h3>FILA DE CONSULTAS &amp; RETRY EXPONENCIAL</h3><p id="queueSummaryText">Fila ociosa — sem pendências.</p></div>
         <div class="queue-actions">
           <button id="queueRefreshBtn" type="button" class="queue-action-btn">Atualizar fila</button>
+          <button id="queueFullSyncBtn" type="button" class="queue-action-btn" title="Forçar reconciliação completa de todos os pedidos do dia">Reconciliação completa</button>
           <button id="queuePauseResumeBtn" type="button" class="queue-action-btn warn">Pausar fila</button>
         </div>
       </div>
@@ -79,7 +80,7 @@
       <div class="analytics-controls"><input id="analyticSearch" type="search" placeholder="Buscar pedido, canal, e-commerce ou Fulfillment"><select id="analyticCompany"><option value="all">Todas as empresas</option><option>Oficial</option><option>Prioriza</option><option>OFICIALSP</option><option>OFICIALSP2</option></select><select id="analyticChannel"><option value="all">Todos os canais</option></select><select id="analyticFulfillment" aria-label="Filtrar modalidade"><option value="all">Todas as modalidades</option><option value="fulfillment">Somente Fulfillment</option><option value="padrao">Somente Padrão</option></select></div>
       <div class="analytics-table-wrap"><table class="analytics-table"><thead><tr><th>Pedido</th><th>Empresa</th><th>Canal padrão</th><th>E-commerce Tiny</th><th>Modalidade</th><th>Situação</th><th>Detalhe</th><th>Valor</th></tr></thead><tbody id="analyticsRows"></tbody></table></div>
     </section>
-    <footer><span>BLACK FRIDAY OFICIAL 2026</span><p>Fonte oficial • Tiny API Oficial + Prioriza + OFICIALSP + OFICIALSP2 • AUTO 30 MIN</p><div>REMADA BLACK <b>● AO VIVO</b></div></footer>
+    <footer><span>BLACK FRIDAY OFICIAL 2026</span><p>Fonte oficial • Tiny API Oficial + Prioriza + OFICIALSP + OFICIALSP2 • AUTO 3 MIN • TEMPO REAL</p><div>REMADA BLACK <b>● AO VIVO</b></div></footer>
   </main>
   <div id="toast" role="status"></div>
   <script src="daily-targets.js"></script>

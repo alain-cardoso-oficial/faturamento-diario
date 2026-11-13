@@ -2,5 +2,6 @@
 .env.local
 data/hourly-snapshots.json
 data/tiny-order-cache.json
+data/daily-orders-state.json
 node_modules/
 *.tmp
