@@ -12,6 +12,25 @@ Os tokens ficam apenas em `.env.local`, ignorado pelo Git. O histórico local fi
 
 O botão **Atualizar dados** força uma leitura imediata. O servidor atualiza automaticamente nos minutos `00` e `30`, enquanto o front consulta o resultado local a cada minuto.
 
+## Meta diária
+
+As metas diárias de GMV da operação para novembro de 2026 (`01/11/2026` a `30/11/2026`) ficam centralizadas em [`site/dist/daily-targets.js`](site/dist/daily-targets.js).
+
+- A resolução da data usa sempre o fuso horário `America/Sao_Paulo`.
+- O backend (`server.js`) expõe o campo `target` nos payloads de `/api/data` e `/api/update-data` com base em `dataDate`.
+- O painel (`site/dist/app.js`) consome `target` da API e usa o mesmo módulo compartilhado no carregamento inicial ou na importação manual de CSV.
+- Datas sem meta cadastrada retornam `null` e exibem o estado `Sem meta` no card **ATINGIMENTO DA META**.
+
+## Testes
+
+Com Node.js 20+ instalado:
+
+```bash
+npm test
+```
+
+Executa [`tests/daily-targets.test.js`](tests/daily-targets.test.js) via `node --test` (cobertura da tabela de novembro/2026, virada de fuso `America/Sao_Paulo`, renderização do card no frontend e smoke test HTTP de `/api/data`).
+
 ## Implantação na VPS (Domínio: `bi-vendas.oficialwebshop.com.br`)
 
 Para implantar na VPS sob o domínio `bi-vendas.oficialwebshop.com.br`:

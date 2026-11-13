@@ -1,6 +1,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const { brDateIso, getDailyTargetValue } = require('./site/dist/daily-targets.js');
 
 const ROOT = __dirname;
 const PUBLIC = path.join(ROOT, 'site', 'dist');
@@ -27,7 +28,7 @@ const accounts = [
   { empresa: 'Prioriza', token: process.env.TINY_PRIORIZA_TOKEN }
 ];
 
-const brDate = (value = new Date()) => new Intl.DateTimeFormat('en-CA', { timeZone:TZ, year:'numeric', month:'2-digit', day:'2-digit' }).format(new Date(value));
+const brDate = brDateIso;
 const brHour = iso => new Intl.DateTimeFormat('pt-BR', { timeZone:TZ, hour:'2-digit', minute:'2-digit', hour12:false }).format(new Date(iso));
 function apiDate(value = new Date()) { const [y,m,d] = brDate(value).split('-'); return `${d}/${m}/${y}`; }
 function slotKey(iso) { const [h,m] = brHour(iso).split(':').map(Number); return `${String(h).padStart(2,'0')}:${m < 30 ? '00' : '30'}`; }
@@ -128,6 +129,7 @@ function buildPayload(all) {
   const names = [...new Set(snapshots.flatMap(s => Object.keys(s.channels || {})))];
   const series = names.map(canal => { let previous = 0; return {channel:canal,hours:snapshots.map(s => { const current=num(s.channels[canal]), value=Math.max(0,current-previous); previous=current; return {hour:s.slot || slotKey(s.at),value}; })}; });
   const latest = snapshots.at(-1) || {};
+  const dataDate = latest.dataDate || today;
   const totalGmv = Object.values(latest.channels || {}).reduce((sum,value)=>sum+num(value),0);
   const totalOrders = Object.values(latest.orders || {}).reduce((sum,value)=>sum+num(value),0);
   let previousGmv = null, previousOrders = null;
@@ -138,7 +140,7 @@ function buildPayload(all) {
     previousGmv = gmv; previousOrders = orderCount;
     return item;
   });
-  return {updatedAt:latest.at||null,dataDate:latest.dataDate||today,series,currentChannels:latest.channels||{},previousChannels:snapshots.at(-2)?.channels||{},snapshotHistory,snapshots:snapshots.length,source:'Tiny API Oficial + Prioriza',accounts:latest.accounts||[],business:latest.business||[],analytics:latest.analytics||[],metrics:{totalGmv,totalOrders,ticket:totalOrders?totalGmv/totalOrders:0}};
+  return {updatedAt:latest.at||null,dataDate,target:getDailyTargetValue(dataDate),series,currentChannels:latest.channels||{},previousChannels:snapshots.at(-2)?.channels||{},snapshotHistory,snapshots:snapshots.length,source:'Tiny API Oficial + Prioriza',accounts:latest.accounts||[],business:latest.business||[],analytics:latest.analytics||[],metrics:{totalGmv,totalOrders,ticket:totalOrders?totalGmv/totalOrders:0}};
 }
 
 let updating = null;

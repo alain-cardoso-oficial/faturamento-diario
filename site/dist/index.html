@@ -37,7 +37,7 @@
       <article class="metric featured"><div class="metric-top"><span>GMV TOTAL</span><b>ACUMULADO</b></div><strong id="totalGMV">R$ 0</strong><div class="delta" id="totalDelta">▲ 0% vs. hora anterior</div><div class="spark" id="sparkline"></div></article>
       <article class="metric"><div class="metric-top"><span>GMV ÚLTIMO SNAPSHOT</span><b id="currentHour">—</b></div><strong id="hourGMV">R$ 0</strong><div class="delta" id="hourDelta">▲ 0% vs. snapshot anterior</div><div class="progress"><i id="hourProgress"></i></div></article>
       <article class="metric"><div class="metric-top"><span>CANAL LÍDER</span><b>#1</b></div><div class="leader"><div id="leaderIcon" class="channel-icon lg">?</div><div><strong id="leaderName">—</strong><small id="leaderShare">0% do GMV</small></div></div><div class="progress"><i id="leaderProgress"></i></div></article>
-      <article class="metric target"><div class="metric-top"><span>ATINGIMENTO DA META</span><b>R$ 671.585</b></div><strong id="targetValue">0%</strong><div class="target-bar"><i id="targetProgress"></i><span></span></div><small id="targetGap">Faltam R$ 671.585 para a meta</small></article>
+      <article class="metric target"><div class="metric-top"><span>ATINGIMENTO DA META</span><b id="targetAmount">—</b></div><strong id="targetValue">0%</strong><div class="target-bar"><i id="targetProgress"></i><span></span></div><small id="targetGap">Aguardando primeira carga do dia</small></article>
     </section>
 
     <section class="monitor-grid" aria-label="Indicadores de monitoramento">
@@ -70,6 +70,7 @@
     <footer><span>BLACK FRIDAY OFICIAL 2026</span><p>Fonte oficial • Tiny API Oficial + Prioriza • AUTO 30 MIN</p><div>REMADA BLACK <b>● AO VIVO</b></div></footer>
   </main>
   <div id="toast" role="status"></div>
+  <script src="daily-targets.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
