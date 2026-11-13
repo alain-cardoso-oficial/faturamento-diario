@@ -26,9 +26,21 @@
       <div class="actions">
         <label class="upload" title="Importar CSV"><input id="fileInput" type="file" accept=".csv,text/csv"/><span>↑</span> Importar base</label>
         <button id="refreshBtn"><span class="refresh-icon">↻</span> Atualizar dados</button>
+        <button id="queueToggleBtn" class="queue-btn" type="button" title="Consultar ou pausar fila de atualização">Fila: <b id="queueBadge">OK</b></button>
         <div class="status" id="updateStatus"><i></i><div><small id="statusLabel">ÚLTIMA ATUALIZAÇÃO</small><strong id="lastUpdate">—</strong></div></div>
       </div>
     </header>
+
+    <section id="queuePanel" class="queue-panel" hidden aria-label="Fila de sincronização Tiny">
+      <div class="queue-head">
+        <div><span class="kicker">CONTROLE DE COLETA TINY</span><h3>FILA DE CONSULTAS &amp; RETRY EXPONENCIAL</h3><p id="queueSummaryText">Fila ociosa — sem pendências.</p></div>
+        <div class="queue-actions">
+          <button id="queueRefreshBtn" type="button" class="queue-action-btn">Atualizar fila</button>
+          <button id="queuePauseResumeBtn" type="button" class="queue-action-btn warn">Pausar fila</button>
+        </div>
+      </div>
+      <div id="queueAccounts" class="queue-accounts"></div>
+    </section>
 
     <nav class="view-tabs" aria-label="Navegação do relatório"><button class="view-tab active" data-view="dashboardView">PAINEL EXECUTIVO</button><button class="view-tab" data-view="analyticsView">TABELA ANALÍTICA</button></nav>
 
@@ -64,13 +76,14 @@
     </div>
     <section id="analyticsView" class="report-view analytics-view">
       <div class="analytics-head"><div><span class="kicker">RAIO X OPERACIONAL</span><h2>TABELA ANALÍTICA DE PEDIDOS</h2><p>Conferência da origem, empresa, situação e valor de cada pedido capturado hoje.</p></div><div class="analytics-kpis"><span><small>PEDIDOS</small><b id="analyticOrders">0</b></span><span><small>GMV</small><b id="analyticGmv">R$ 0</b></span><span><small>DETALHES COMPLETOS</small><b id="analyticComplete">0%</b></span></div></div>
-      <div class="analytics-controls"><input id="analyticSearch" type="search" placeholder="Buscar pedido, canal ou e-commerce"><select id="analyticCompany"><option value="all">Todas as empresas</option><option>Oficial</option><option>Prioriza</option></select><select id="analyticChannel"><option value="all">Todos os canais</option></select></div>
-      <div class="analytics-table-wrap"><table class="analytics-table"><thead><tr><th>Pedido</th><th>Empresa</th><th>Canal padrão</th><th>E-commerce Tiny</th><th>Situação</th><th>Detalhe</th><th>Valor</th></tr></thead><tbody id="analyticsRows"></tbody></table></div>
+      <div class="analytics-controls"><input id="analyticSearch" type="search" placeholder="Buscar pedido, canal, e-commerce ou Fulfillment"><select id="analyticCompany"><option value="all">Todas as empresas</option><option>Oficial</option><option>Prioriza</option><option>OFICIALSP</option><option>OFICIALSP2</option></select><select id="analyticChannel"><option value="all">Todos os canais</option></select><select id="analyticFulfillment" aria-label="Filtrar modalidade"><option value="all">Todas as modalidades</option><option value="fulfillment">Somente Fulfillment</option><option value="padrao">Somente Padrão</option></select></div>
+      <div class="analytics-table-wrap"><table class="analytics-table"><thead><tr><th>Pedido</th><th>Empresa</th><th>Canal padrão</th><th>E-commerce Tiny</th><th>Modalidade</th><th>Situação</th><th>Detalhe</th><th>Valor</th></tr></thead><tbody id="analyticsRows"></tbody></table></div>
     </section>
-    <footer><span>BLACK FRIDAY OFICIAL 2026</span><p>Fonte oficial • Tiny API Oficial + Prioriza • AUTO 30 MIN</p><div>REMADA BLACK <b>● AO VIVO</b></div></footer>
+    <footer><span>BLACK FRIDAY OFICIAL 2026</span><p>Fonte oficial • Tiny API Oficial + Prioriza + OFICIALSP + OFICIALSP2 • AUTO 30 MIN</p><div>REMADA BLACK <b>● AO VIVO</b></div></footer>
   </main>
   <div id="toast" role="status"></div>
   <script src="daily-targets.js"></script>
+  <script src="order-classifier.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

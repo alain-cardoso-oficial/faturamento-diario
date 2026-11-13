@@ -2,39 +2,211 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const { brDateIso, getDailyTargetValue } = require('./site/dist/daily-targets.js');
+const {
+  buildAccounts,
+  num,
+  cancelled,
+  countableSale,
+  sellerName,
+  shouldIncludeOrder,
+  channel,
+  orderValue,
+  analyticRow
+} = require('./site/dist/order-classifier.js');
 
 const ROOT = __dirname;
 const PUBLIC = path.join(ROOT, 'site', 'dist');
-const SNAPSHOTS = path.join(ROOT, 'data', 'hourly-snapshots.json');
-const DETAIL_CACHE = path.join(ROOT, 'data', 'tiny-order-cache.json');
-const PORT = Number(process.env.PORT || 8787);
-const TZ = 'America/Sao_Paulo';
-const PESQUISA_ENDPOINT = 'https://api.tiny.com.br/api2/pedidos.pesquisa.php';
-const OBTER_ENDPOINT = 'https://api.tiny.com.br/api2/pedido.obter.php';
-const DETAIL_DELAY_MS = Number(process.env.TINY_DETAIL_DELAY_MS || 1200);
 
-function loadEnv() {
-  const file = path.join(ROOT, '.env.local');
-  if (!fs.existsSync(file)) return;
-  for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
-    const match = line.match(/^([A-Z0-9_]+)=(.*)$/);
-    if (match && !process.env[match[1]]) process.env[match[1]] = match[2].trim();
+function loadEnv(rootDir = ROOT, targetEnv = process.env) {
+  for (const fileName of ['.env.local', '.env']) {
+    const file = path.join(rootDir, fileName);
+    if (!fs.existsSync(file)) continue;
+    for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const match = trimmed.match(/^([A-Z0-9_]+)=(.*)$/);
+      if (match && !targetEnv[match[1]]) {
+        targetEnv[match[1]] = match[2].trim().replace(/^['"]|['"]$/g, '');
+      }
+    }
   }
 }
 loadEnv();
 
-const accounts = [
-  { empresa: 'Oficial', token: process.env.TINY_OFICIAL_TOKEN },
-  { empresa: 'Prioriza', token: process.env.TINY_PRIORIZA_TOKEN }
-];
+const SNAPSHOTS = process.env.SNAPSHOTS_FILE || path.join(ROOT, 'data', 'hourly-snapshots.json');
+const DETAIL_CACHE = process.env.DETAIL_CACHE_FILE || path.join(ROOT, 'data', 'tiny-order-cache.json');
+const PORT = Number(process.env.PORT || 8787);
+const TZ = 'America/Sao_Paulo';
+const PESQUISA_ENDPOINT = process.env.TINY_PESQUISA_ENDPOINT || 'https://api.tiny.com.br/api2/pedidos.pesquisa.php';
+const OBTER_ENDPOINT = process.env.TINY_OBTER_ENDPOINT || 'https://api.tiny.com.br/api2/pedido.obter.php';
+const DETAIL_DELAY_MS = Number(process.env.TINY_DETAIL_DELAY_MS || 1200);
+const RETRY_BASE_MS = Number(process.env.TINY_RETRY_BASE_MS || 5000);
+const RETRY_MAX_MS = Number(process.env.TINY_RETRY_MAX_MS || 300000);
+const RETRY_MAX_ATTEMPTS = Number(process.env.TINY_RETRY_MAX_ATTEMPTS || 6);
+const SOURCE_LABEL = 'Tiny API Oficial + Prioriza + OFICIALSP + OFICIALSP2';
+
+const accounts = buildAccounts(process.env);
 
 const brDate = brDateIso;
-const brHour = iso => new Intl.DateTimeFormat('pt-BR', { timeZone:TZ, hour:'2-digit', minute:'2-digit', hour12:false }).format(new Date(iso));
-function apiDate(value = new Date()) { const [y,m,d] = brDate(value).split('-'); return `${d}/${m}/${y}`; }
-function slotKey(iso) { const [h,m] = brHour(iso).split(':').map(Number); return `${String(h).padStart(2,'0')}:${m < 30 ? '00' : '30'}`; }
+const brHour = iso => new Intl.DateTimeFormat('pt-BR', { timeZone: TZ, hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(iso));
+function apiDate(value = new Date()) { const [y, m, d] = brDate(value).split('-'); return `${d}/${m}/${y}`; }
+function slotKey(iso) { const [h, m] = brHour(iso).split(':').map(Number); return `${String(h).padStart(2, '0')}:${m < 30 ? '00' : '30'}`; }
 function readJson(file, fallback) { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; } }
-function writeJson(file, value) { fs.mkdirSync(path.dirname(file), {recursive:true}); const tmp = `${file}.tmp`; fs.writeFileSync(tmp, JSON.stringify(value, null, 2)); fs.renameSync(tmp, file); }
+function writeJson(file, value) { fs.mkdirSync(path.dirname(file), { recursive: true }); const tmp = `${file}.tmp`; fs.writeFileSync(tmp, JSON.stringify(value, null, 2)); fs.renameSync(tmp, file); }
 function readDetailCache() { const cache = readJson(DETAIL_CACHE, {}); for (const item of Object.values(cache)) item.valor = item.valor || item.total_pedido || item.totalVenda || 0; return cache; }
+
+let updating = null;
+let recoveryTimer = null;
+let cancelActiveDelay = null;
+let reconciliationState = { status: 'ok', pending: 0, message: '' };
+let cycleDate = null;
+const cycleCompletedByEmpresa = new Map();
+
+const syncQueue = {
+  status: 'idle',
+  paused: false,
+  pausedAt: null,
+  pausedReason: null,
+  attempt: 0,
+  maxAttempts: RETRY_MAX_ATTEMPTS,
+  backoffMs: null,
+  nextRetryAt: null,
+  lastError: null,
+  startedAt: null,
+  updatedAt: null,
+  currentTask: null,
+  accounts: accounts.map(acc => ({
+    empresa: acc.empresa,
+    requiredMarkers: [...acc.requiredMarkers],
+    status: 'idle',
+    foundOrders: 0,
+    pendingOrders: 0,
+    processedOrders: 0,
+    pendingOrderIds: [],
+    lastError: null
+  }))
+};
+
+function getAccountQueueEntry(empresa) {
+  return syncQueue.accounts.find(a => a.empresa === empresa);
+}
+
+function getTotalPending() {
+  return syncQueue.accounts.reduce((sum, acc) => sum + Number(acc.pendingOrders || 0), 0);
+}
+
+function getQueueSnapshot() {
+  return {
+    status: syncQueue.status,
+    paused: syncQueue.paused,
+    pausedAt: syncQueue.pausedAt,
+    pausedReason: syncQueue.pausedReason,
+    attempt: syncQueue.attempt,
+    maxAttempts: syncQueue.maxAttempts,
+    backoffMs: syncQueue.backoffMs,
+    nextRetryAt: syncQueue.nextRetryAt,
+    lastError: syncQueue.lastError,
+    startedAt: syncQueue.startedAt,
+    updatedAt: syncQueue.updatedAt,
+    currentTask: syncQueue.currentTask ? { ...syncQueue.currentTask } : null,
+    pendingTotal: getTotalPending(),
+    accounts: syncQueue.accounts.map(acc => ({
+      empresa: acc.empresa,
+      requiredMarkers: [...acc.requiredMarkers],
+      status: acc.status,
+      foundOrders: acc.foundOrders,
+      pendingOrders: acc.pendingOrders,
+      processedOrders: acc.processedOrders,
+      pendingOrderIds: [...acc.pendingOrderIds],
+      lastError: acc.lastError
+    }))
+  };
+}
+
+function computeBackoffMs(attempt) {
+  const exp = Math.max(0, Number(attempt || 1) - 1);
+  return Math.min(RETRY_MAX_MS, RETRY_BASE_MS * (2 ** exp));
+}
+
+function ensureNotPaused() {
+  if (!syncQueue.paused) return;
+  const error = new Error(syncQueue.pausedReason || 'Fila de consultas pausada pelo usuário');
+  error.code = 'QUEUE_PAUSED';
+  error.retryable = false;
+  throw error;
+}
+
+function interruptibleDelay(ms) {
+  if (ms <= 0) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cancelActiveDelay = null;
+      if (syncQueue.paused) {
+        try { ensureNotPaused(); } catch (err) { reject(err); return; }
+      }
+      resolve();
+    }, ms);
+    cancelActiveDelay = () => {
+      clearTimeout(timer);
+      cancelActiveDelay = null;
+      try { ensureNotPaused(); } catch (err) { reject(err); }
+    };
+  });
+}
+
+function pauseQueue(reason = 'Fila pausada pelo usuário') {
+  syncQueue.paused = true;
+  syncQueue.pausedAt = new Date().toISOString();
+  syncQueue.pausedReason = String(reason || 'Fila pausada pelo usuário').trim() || 'Fila pausada pelo usuário';
+  syncQueue.status = 'paused';
+  syncQueue.nextRetryAt = null;
+  syncQueue.backoffMs = null;
+  syncQueue.currentTask = null;
+  syncQueue.updatedAt = syncQueue.pausedAt;
+  if (recoveryTimer) {
+    clearTimeout(recoveryTimer);
+    recoveryTimer = null;
+  }
+  for (const acc of syncQueue.accounts) {
+    if (['searching', 'enriching', 'retrying', 'pending'].includes(acc.status)) {
+      acc.status = 'paused';
+    }
+  }
+  reconciliationState = {
+    status: 'paused',
+    pending: getTotalPending(),
+    message: syncQueue.pausedReason
+  };
+  if (cancelActiveDelay) cancelActiveDelay();
+  return getQueueSnapshot();
+}
+
+function resumeQueue({ triggerNow = true } = {}) {
+  syncQueue.paused = false;
+  syncQueue.pausedAt = null;
+  syncQueue.pausedReason = null;
+  syncQueue.attempt = 0;
+  syncQueue.lastError = null;
+  syncQueue.nextRetryAt = null;
+  syncQueue.backoffMs = null;
+  syncQueue.updatedAt = new Date().toISOString();
+  for (const acc of syncQueue.accounts) {
+    if (['paused', 'retrying', 'failed'].includes(acc.status)) {
+      acc.status = 'pending';
+      acc.lastError = null;
+    }
+  }
+  syncQueue.status = updating ? 'running' : 'idle';
+  reconciliationState = {
+    status: updating ? 'updating' : 'ok',
+    pending: getTotalPending(),
+    message: 'Fila retomada'
+  };
+  if (triggerNow && !updating && process.env.READ_ONLY_PREVIEW !== '1') {
+    updateData().catch(error => console.error(`Retomada da fila: ${error.message}`));
+  }
+  return getQueueSnapshot();
+}
 
 function tinyError(root, context) {
   if (root?.status === 'OK') return null;
@@ -43,24 +215,32 @@ function tinyError(root, context) {
   if (code === 20 || /não retornou registros/i.test(message)) return 'EMPTY';
   return new Error(`${context}: ${message}`);
 }
+
 async function tinyPost(endpoint, token, params = {}) {
+  ensureNotPaused();
   const response = await fetch(endpoint, {
-    method:'POST',
-    headers:{'Content-Type':'application/x-www-form-urlencoded'},
-    body:new URLSearchParams({token, formato:'JSON', ...params}),
-    signal:AbortSignal.timeout(30000)
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ token, formato: 'JSON', ...params }),
+    signal: AbortSignal.timeout(30000)
   });
   if (!response.ok) throw new Error(`Tiny HTTP ${response.status}`);
   return response.json();
 }
-async function searchOrders(account) {
-  if (!account.token) throw new Error(`Token Tiny não configurado para ${account.empresa}`);
+
+async function searchOrdersByQuery(account, extraParams = {}) {
   const date = apiDate(), found = [];
   let page = 1, pages = 1;
   do {
-    const json = await tinyPost(PESQUISA_ENDPOINT, account.token, {dataInicial:date, dataFinal:date, pagina:String(page)});
+    ensureNotPaused();
+    const json = await tinyPost(PESQUISA_ENDPOINT, account.token, {
+      dataInicial: date,
+      dataFinal: date,
+      pagina: String(page),
+      ...extraParams
+    });
     const root = json?.retorno || {}, error = tinyError(root, `${account.empresa} pesquisa`);
-    if (error === 'EMPTY') return [];
+    if (error === 'EMPTY') return found;
     if (error) throw error;
     found.push(...(root.pedidos || []).map(x => x.pedido || x).filter(Boolean));
     pages = Number(root.numero_paginas || 1);
@@ -68,177 +248,512 @@ async function searchOrders(account) {
   } while (page <= pages);
   return found;
 }
+
+async function searchOrders(account) {
+  ensureNotPaused();
+  if (!account.token) {
+    const error = new Error(`Token Tiny não configurado para ${account.empresa}`);
+    error.code = 'CONFIG_ERROR';
+    throw error;
+  }
+  if (Array.isArray(account.requiredMarkers) && account.requiredMarkers.length > 0) {
+    const byId = new Map();
+    for (const marker of account.requiredMarkers) {
+      const orders = await searchOrdersByQuery(account, { marcador: marker });
+      for (const order of orders) {
+        const key = String(order.id || order.numero || '');
+        if (key && !byId.has(key)) byId.set(key, order);
+      }
+    }
+    return [...byId.values()];
+  }
+  return searchOrdersByQuery(account);
+}
+
 async function getOrder(account, summary) {
-  const json = await tinyPost(OBTER_ENDPOINT, account.token, {id:String(summary.id)});
+  ensureNotPaused();
+  const json = await tinyPost(OBTER_ENDPOINT, account.token, { id: String(summary.id) });
   const root = json?.retorno || {}, error = tinyError(root, `${account.empresa} pedido ${summary.id}`);
-  if (error === 'EMPTY') return {...summary, _tinyDetail:false};
+  if (error === 'EMPTY') return { ...summary, _tinyDetail: false };
   if (error) throw error;
   const detail = root.pedido || summary;
-  return {...detail, valor:detail.valor || detail.total_pedido || detail.totalVenda || 0, _tinyDetail:true};
-}
-const num = value => { const parsed = Number(String(value ?? 0).replace(',','.')); return Number.isFinite(parsed) ? parsed : 0; };
-const cancelled = order => /cancelad|exclu/i.test(String(order.situacao || ''));
-const countableSale = order => !cancelled(order) && !/^em aberto$/i.test(String(order.situacao || '').trim());
-function ecommerceName(order) {
-  if (typeof order.ecommerce === 'string') return order.ecommerce.trim();
-  return String(order.ecommerce?.nomeEcommerce || order.ecommerce?.canalVenda || order.nome_ecommerce || order.nomeEcommerce || '').trim();
-}
-function sellerName(order) {
-  return String(order.nome_vendedor || order.nomeVendedor || order.vendedor?.nome || order.vendedor?.nomeVendedor || '').trim();
-}
-function channel(order) {
-  const markers = (order.marcadores || []).map(x => x?.marcador?.descricao || x?.descricao || '').join(' ');
-  const seller = sellerName(order).normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().replace(/\s+/g, ' ').toUpperCase();
-  if (/^(GABRIEL BARBOSA|CAMILA WALESKO|ANDREIA OTTO|ISABEL LARA)$/.test(seller)) return 'Vendas Diretas';
-  const raw = [ecommerceName(order), order.intermediador?.nome, sellerName(order), order.forma_pagamento, order.obs, order.observacoes, order.obs_interna, markers, order.forma_envio].filter(Boolean).join(' ').toUpperCase();
-  if (/TRAY/.test(raw)) return 'Site';
-  if (/MERCADO\s*LIVRE|\bMELI\b/.test(raw)) return 'Meli';
-  if (/SHOPEE/.test(raw)) return 'Shopee';
-  if (/MAGALU|MAGAZINE\s*LUIZA/.test(raw)) return 'MagaLu';
-  if (/AMAZON/.test(raw)) return 'Amazon';
-  if (/TIK\s*TOK/.test(raw)) return 'TikTok';
-  if (/KABUM/.test(raw)) return 'Kabum';
-  if (/MADEIRA/.test(raw)) return 'Madeira';
-  if (/CARREFOUR/.test(raw)) return 'Carrefour';
-  if (/LEROY/.test(raw)) return 'Leroy';
-  if (/WEB\s*CONTINENTAL|\bWCO\b/.test(raw)) return 'WebContinental';
-  if (/CASAS\s*BAHIA|PONTO|EXTRA|\bVIA\b/.test(raw)) return 'Via';
-  if (/ALIEXPRESS/.test(raw)) return 'AliExpress';
-  if (/VENDA(S)?\s+DIRETA(S)?|(^|\s)VD($|\s)/.test(raw)) return 'Vendas Diretas';
-  return 'A identificar';
-}
-function orderValue(order) {
-  return num(order.valor || order.total_pedido || order.totalVenda || order.total_venda || order.totalProdutos || order.total_produtos)
-    || num(order.totalProdutos || order.total_produtos) + num(order.frete || order.valor_frete) - num(order.desconto || order.valor_desconto);
-}
-function analyticRow(order, empresa, detailed) {
-  return {
-    empresa,
-    pedido:String(order.numero || order.id || '—'),
-    canal:channel(order),
-    ecommerce:ecommerceName(order) || 'Sem e-commerce',
-    situacao:String(order.situacao || '—'),
-    valor:orderValue(order),
-    detalhe:detailed ? 'Completo' : 'Pendente'
-    ,contabilizado:countableSale(order)
-  };
+  return { ...detail, valor: detail.valor || detail.total_pedido || detail.totalVenda || 0, _tinyDetail: true };
 }
 
 function buildPayload(all) {
-  const today = brDate(), snapshots = all.filter(s => s.dataDate === today).sort((a,b) => new Date(a.at)-new Date(b.at));
+  const today = brDate(), snapshots = all.filter(s => s.dataDate === today).sort((a, b) => new Date(a.at) - new Date(b.at));
   const names = [...new Set(snapshots.flatMap(s => Object.keys(s.channels || {})))];
-  const series = names.map(canal => { let previous = 0; return {channel:canal,hours:snapshots.map(s => { const current=num(s.channels[canal]), value=Math.max(0,current-previous); previous=current; return {hour:s.slot || slotKey(s.at),value}; })}; });
+  const series = names.map(canal => {
+    let previous = 0;
+    return {
+      channel: canal,
+      hours: snapshots.map(s => {
+        const current = num(s.channels[canal]), value = Math.max(0, current - previous);
+        previous = current;
+        return { hour: s.slot || slotKey(s.at), value };
+      })
+    };
+  });
   const latest = snapshots.at(-1) || {};
   const dataDate = latest.dataDate || today;
-  const totalGmv = Object.values(latest.channels || {}).reduce((sum,value)=>sum+num(value),0);
-  const totalOrders = Object.values(latest.orders || {}).reduce((sum,value)=>sum+num(value),0);
+  const totalGmv = Object.values(latest.channels || {}).reduce((sum, value) => sum + num(value), 0);
+  const totalOrders = Object.values(latest.orders || {}).reduce((sum, value) => sum + num(value), 0);
   let previousGmv = null, previousOrders = null;
-  const snapshotHistory = snapshots.map((snapshot,index) => {
-    const gmv = Object.values(snapshot.channels || {}).reduce((sum,value)=>sum+num(value),0);
-    const orderCount = Object.values(snapshot.orders || {}).reduce((sum,value)=>sum+num(value),0);
-    const item = {at:snapshot.at,slot:snapshot.slot || slotKey(snapshot.at),gmv,orders:orderCount,isBaseline:index===0,deltaGmv:index===0?null:Math.max(0,gmv-previousGmv),deltaOrders:index===0?null:Math.max(0,orderCount-previousOrders)};
-    previousGmv = gmv; previousOrders = orderCount;
+  const snapshotHistory = snapshots.map((snapshot, index) => {
+    const gmv = Object.values(snapshot.channels || {}).reduce((sum, value) => sum + num(value), 0);
+    const orderCount = Object.values(snapshot.orders || {}).reduce((sum, value) => sum + num(value), 0);
+    const item = {
+      at: snapshot.at,
+      slot: snapshot.slot || slotKey(snapshot.at),
+      gmv,
+      orders: orderCount,
+      isBaseline: index === 0,
+      deltaGmv: index === 0 ? null : Math.max(0, gmv - previousGmv),
+      deltaOrders: index === 0 ? null : Math.max(0, orderCount - previousOrders)
+    };
+    previousGmv = gmv;
+    previousOrders = orderCount;
     return item;
   });
-  return {updatedAt:latest.at||null,dataDate,target:getDailyTargetValue(dataDate),series,currentChannels:latest.channels||{},previousChannels:snapshots.at(-2)?.channels||{},snapshotHistory,snapshots:snapshots.length,source:'Tiny API Oficial + Prioriza',accounts:latest.accounts||[],business:latest.business||[],analytics:latest.analytics||[],metrics:{totalGmv,totalOrders,ticket:totalOrders?totalGmv/totalOrders:0}};
+  return {
+    updatedAt: latest.at || null,
+    dataDate,
+    target: getDailyTargetValue(dataDate),
+    series,
+    currentChannels: latest.channels || {},
+    previousChannels: snapshots.at(-2)?.channels || {},
+    snapshotHistory,
+    snapshots: snapshots.length,
+    source: SOURCE_LABEL,
+    accounts: latest.accounts || [],
+    business: latest.business || [],
+    analytics: latest.analytics || [],
+    metrics: { totalGmv, totalOrders, ticket: totalOrders ? totalGmv / totalOrders : 0 }
+  };
 }
 
-let updating = null;
-let recoveryTimer = null;
-let reconciliationState = {status:'ok', pending:0, message:''};
 function hasFullDetail(order) {
   return order?._tinyDetail === true || Array.isArray(order?.itens) || Object.prototype.hasOwnProperty.call(order || {}, 'total_pedido');
 }
+
+function hasUsableCache(account, cachedOrder) {
+  if (!hasFullDetail(cachedOrder)) return false;
+  if (Array.isArray(account.requiredMarkers) && account.requiredMarkers.length > 0) {
+    return shouldIncludeOrder(cachedOrder, account.empresa);
+  }
+  return true;
+}
+
 function mergeCurrentOrder(summary, detail) {
-  const order = {...summary, ...(detail || {})};
-  for (const field of ['id','numero','situacao','valor','total_pedido','data_pedido','data_prevista']) {
+  const order = { ...summary, ...(detail || {}) };
+  for (const field of ['id', 'numero', 'situacao', 'valor', 'total_pedido', 'data_pedido', 'data_prevista']) {
     if (summary?.[field] !== undefined && summary[field] !== null && summary[field] !== '') order[field] = summary[field];
   }
   if (!sellerName(order) && sellerName(summary)) order.nome_vendedor = sellerName(summary);
   return order;
 }
+
 async function enrichAccount(account, cache, summaries) {
-  const pending = summaries.filter(summary => !hasFullDetail(cache[`${account.empresa}:${summary.id}`]));
-  for (const summary of pending) {
+  const qAcc = getAccountQueueEntry(account.empresa);
+  const pending = summaries.filter(summary => !hasUsableCache(account, cache[`${account.empresa}:${summary.id}`]));
+  if (qAcc) {
+    qAcc.status = pending.length ? 'enriching' : 'completed';
+    qAcc.foundOrders = summaries.length;
+    qAcc.pendingOrders = pending.length;
+    qAcc.processedOrders = summaries.length - pending.length;
+    qAcc.pendingOrderIds = pending.slice(0, 50).map(s => String(s.numero || s.id));
+  }
+  reconciliationState = {
+    status: 'updating',
+    pending: getTotalPending(),
+    message: pending.length
+      ? `Conferindo pedidos de ${account.empresa} (${pending.length} pendente(s))`
+      : `Conferindo pedidos de ${account.empresa}`
+  };
+
+  for (let i = 0; i < pending.length; i++) {
+    ensureNotPaused();
+    const summary = pending[i];
+    syncQueue.currentTask = {
+      empresa: account.empresa,
+      stage: 'detalhe',
+      pedidoId: String(summary.numero || summary.id)
+    };
+    syncQueue.updatedAt = new Date().toISOString();
     try {
       const detail = await getOrder(account, summary);
       if (hasFullDetail(detail)) {
         cache[`${account.empresa}:${summary.id}`] = detail;
         writeJson(DETAIL_CACHE, cache);
+        if (qAcc) {
+          qAcc.processedOrders += 1;
+          qAcc.pendingOrders = Math.max(0, qAcc.pendingOrders - 1);
+          qAcc.pendingOrderIds = pending.slice(i + 1, i + 51).map(s => String(s.numero || s.id));
+        }
+        reconciliationState.pending = getTotalPending();
       }
-      await new Promise(resolve => setTimeout(resolve, DETAIL_DELAY_MS));
+      if (i < pending.length - 1) {
+        await interruptibleDelay(DETAIL_DELAY_MS);
+      }
     } catch (error) {
+      if (error.code === 'QUEUE_PAUSED') throw error;
       if (!/Excedido o número de acessos/i.test(error.message)) throw error;
       break;
     }
   }
+
+  ensureNotPaused();
   const unresolved = summaries.filter(summary => countableSale(summary) && !hasFullDetail(cache[`${account.empresa}:${summary.id}`]));
   if (unresolved.length) {
+    if (qAcc) {
+      qAcc.pendingOrders = unresolved.length;
+      qAcc.pendingOrderIds = unresolved.slice(0, 50).map(s => String(s.numero || s.id));
+    }
     const error = new Error(`Reconciliação pendente em ${account.empresa}: ${unresolved.length} pedido(s) aguardando detalhe da API`);
     error.code = 'RECONCILIATION_PENDING';
     error.pending = unresolved.length;
+    error.empresa = account.empresa;
     throw error;
   }
-  return summaries.map(summary => {
-    const detail = cache[`${account.empresa}:${summary.id}`];
-    return {order:mergeCurrentOrder(summary, detail), detailed:hasFullDetail(detail)};
-  }).filter(item => !cancelled(item.order));
+
+  if (qAcc) {
+    qAcc.status = 'completed';
+    qAcc.pendingOrders = 0;
+    qAcc.pendingOrderIds = [];
+    qAcc.lastError = null;
+  }
+
+  return summaries
+    .map(summary => {
+      const detail = cache[`${account.empresa}:${summary.id}`];
+      return { order: mergeCurrentOrder(summary, detail), detailed: hasFullDetail(detail) };
+    })
+    .filter(item => !cancelled(item.order) && shouldIncludeOrder(item.order, account.empresa));
 }
+
 async function updateData() {
+  ensureNotPaused();
   if (updating) return updating;
-  reconciliationState = {status:'updating', pending:0, message:'Conferindo todos os pedidos do dia'};
+
+  if (recoveryTimer) {
+    clearTimeout(recoveryTimer);
+    recoveryTimer = null;
+  }
+
+  const today = brDate();
+  if (cycleDate !== today) {
+    cycleDate = today;
+    cycleCompletedByEmpresa.clear();
+  }
+
+  syncQueue.status = 'running';
+  syncQueue.startedAt = new Date().toISOString();
+  syncQueue.updatedAt = syncQueue.startedAt;
+  syncQueue.nextRetryAt = null;
+  syncQueue.backoffMs = null;
+
+  for (const acc of syncQueue.accounts) {
+    if (!cycleCompletedByEmpresa.has(acc.empresa)) {
+      acc.status = 'pending';
+    }
+  }
+
+  reconciliationState = {
+    status: 'updating',
+    pending: getTotalPending(),
+    message: 'Conferindo todos os pedidos do dia'
+  };
+
   updating = (async () => {
     const cache = readDetailCache();
-    const summariesByAccount = await Promise.all(accounts.map(searchOrders));
     const results = [];
-    for (let index=0; index<accounts.length; index++) results.push({account:accounts[index], items:await enrichAccount(accounts[index], cache, summariesByAccount[index])});
+    let activeAccount = null;
+
+    try {
+      for (const account of accounts) {
+        ensureNotPaused();
+        activeAccount = account;
+        const qAcc = getAccountQueueEntry(account.empresa);
+
+        if (cycleCompletedByEmpresa.has(account.empresa)) {
+          results.push(cycleCompletedByEmpresa.get(account.empresa));
+          if (qAcc) qAcc.status = 'completed';
+          continue;
+        }
+
+        if (qAcc) {
+          qAcc.status = 'searching';
+          qAcc.lastError = null;
+        }
+        syncQueue.currentTask = { empresa: account.empresa, stage: 'pesquisa', pedidoId: null };
+        syncQueue.updatedAt = new Date().toISOString();
+
+        const summaries = await searchOrders(account);
+        const items = await enrichAccount(account, cache, summaries);
+        const entry = { account, items };
+        cycleCompletedByEmpresa.set(account.empresa, entry);
+        results.push(entry);
+      }
+    } catch (error) {
+      if (activeAccount) {
+        const qAcc = getAccountQueueEntry(activeAccount.empresa);
+        if (qAcc) {
+          qAcc.lastError = error.message;
+          qAcc.status = error.code === 'QUEUE_PAUSED' ? 'paused' : 'retrying';
+        }
+      }
+      throw error;
+    }
+
     writeJson(DETAIL_CACHE, cache);
     const channels = {}, orders = {}, business = [], analytics = [], accountStatus = [];
-    for (const {account,items} of results) {
-      accountStatus.push({empresa:account.empresa,pedidos:items.length});
+    for (const { account, items } of results) {
+      accountStatus.push({ empresa: account.empresa, pedidos: items.length });
       const company = {};
       for (const item of items) {
-        const canal = channel(item.order), gmv = orderValue(item.order);
+        const canal = channel(item.order, account.empresa), gmv = orderValue(item.order);
         analytics.push(analyticRow(item.order, account.empresa, item.detailed));
         if (!countableSale(item.order)) continue;
         channels[canal] = (channels[canal] || 0) + gmv;
         orders[canal] = (orders[canal] || 0) + 1;
         company[canal] = (company[canal] || 0) + gmv;
       }
-      for (const [canal,gmv] of Object.entries(company)) business.push({empresa:account.empresa,canal,gmv,pedidos:items.filter(x=>countableSale(x.order)&&channel(x.order)===canal).length});
+      for (const [canal, gmv] of Object.entries(company)) {
+        business.push({
+          empresa: account.empresa,
+          canal,
+          gmv,
+          pedidos: items.filter(x => countableSale(x.order) && channel(x.order, account.empresa) === canal).length
+        });
+      }
     }
-    analytics.sort((a,b)=>b.valor-a.valor);
-    const now = new Date().toISOString(), today = brDate(now), slot = slotKey(now);
-    let snapshots = readJson(SNAPSHOTS, []).filter(s => s.dataDate === today);
-    const snapshot = {at:now,dataDate:today,slot,channels,orders,business,analytics,accounts:accountStatus};
+    analytics.sort((a, b) => b.valor - a.valor);
+    const now = new Date().toISOString(), currentDay = brDate(now), slot = slotKey(now);
+    let snapshots = readJson(SNAPSHOTS, []).filter(s => s.dataDate === currentDay);
+    const snapshot = { at: now, dataDate: currentDay, slot, channels, orders, business, analytics, accounts: accountStatus };
     const existing = snapshots.findIndex(s => (s.slot || slotKey(s.at)) === slot);
     if (existing >= 0) snapshots[existing] = snapshot; else snapshots.push(snapshot);
-    snapshots = snapshots.sort((a,b)=>new Date(a.at)-new Date(b.at)).slice(-48);
+    snapshots = snapshots.sort((a, b) => new Date(a.at) - new Date(b.at)).slice(-48);
     writeJson(SNAPSHOTS, snapshots);
-    reconciliationState = {status:'ok', pending:0, message:'Carga reconciliada sem pendências'};
+
+    cycleCompletedByEmpresa.clear();
+    syncQueue.status = 'idle';
+    syncQueue.attempt = 0;
+    syncQueue.lastError = null;
+    syncQueue.backoffMs = null;
+    syncQueue.nextRetryAt = null;
+    syncQueue.currentTask = null;
+    syncQueue.updatedAt = now;
+    reconciliationState = { status: 'ok', pending: 0, message: 'Carga reconciliada sem pendências' };
     return buildPayload(snapshots);
   })();
-  try { return await updating; }
-  catch (error) {
-    reconciliationState = {status:'retrying', pending:Number(error.pending||0), message:error.message};
-    if (error.code === 'RECONCILIATION_PENDING' || /Excedido o número de acessos/i.test(error.message)) queueRecovery();
+
+  try {
+    return await updating;
+  } catch (error) {
+    syncQueue.currentTask = null;
+    syncQueue.updatedAt = new Date().toISOString();
+
+    if (error.code === 'QUEUE_PAUSED' || syncQueue.paused) {
+      syncQueue.status = 'paused';
+      syncQueue.backoffMs = null;
+      syncQueue.nextRetryAt = null;
+      reconciliationState = {
+        status: 'paused',
+        pending: getTotalPending(),
+        message: syncQueue.pausedReason || error.message
+      };
+      throw error;
+    }
+
+    syncQueue.attempt += 1;
+    syncQueue.lastError = error.message;
+
+    if (syncQueue.attempt <= RETRY_MAX_ATTEMPTS) {
+      const delayMs = computeBackoffMs(syncQueue.attempt);
+      const nextRetryIso = new Date(Date.now() + delayMs).toISOString();
+      syncQueue.status = 'waiting_retry';
+      syncQueue.backoffMs = delayMs;
+      syncQueue.nextRetryAt = nextRetryIso;
+      reconciliationState = {
+        status: 'retrying',
+        pending: Number(error.pending || getTotalPending() || 0),
+        attempt: syncQueue.attempt,
+        maxAttempts: RETRY_MAX_ATTEMPTS,
+        backoffMs: delayMs,
+        nextRetryAt: nextRetryIso,
+        message: `${error.message} (retry #${syncQueue.attempt} em ${Math.max(1, Math.round(delayMs / 1000))}s)`
+      };
+      queueRecovery(delayMs);
+    } else {
+      syncQueue.status = 'failed';
+      syncQueue.backoffMs = null;
+      syncQueue.nextRetryAt = null;
+      for (const acc of syncQueue.accounts) {
+        if (acc.status === 'retrying') acc.status = 'failed';
+      }
+      reconciliationState = {
+        status: 'failed',
+        pending: Number(error.pending || getTotalPending() || 0),
+        attempt: syncQueue.attempt,
+        maxAttempts: RETRY_MAX_ATTEMPTS,
+        message: `Limite de tentativas atingido (${RETRY_MAX_ATTEMPTS}): ${error.message}`
+      };
+    }
     throw error;
+  } finally {
+    updating = null;
   }
-  finally { updating = null; }
 }
-function queueRecovery() {
-  if (recoveryTimer) return;
+
+function queueRecovery(delayMs = RETRY_BASE_MS) {
+  if (recoveryTimer || syncQueue.paused) return;
   recoveryTimer = setTimeout(async () => {
     recoveryTimer = null;
-    try { await updateData(); console.log('Reconciliação automática concluída'); }
-    catch (error) { console.error(`Reconciliação automática: ${error.message}`); }
-  }, 60000);
+    if (syncQueue.paused) return;
+    try {
+      await updateData();
+      console.log('Reconciliação automática concluída');
+    } catch (error) {
+      console.error(`Reconciliação automática: ${error.message}`);
+    }
+  }, Math.max(10, Number(delayMs || RETRY_BASE_MS)));
   recoveryTimer.unref?.();
 }
+
 function schedule() {
-  const now = new Date(), delay = (30-now.getMinutes()%30)*60000-now.getSeconds()*1000-now.getMilliseconds()+2000;
-  setTimeout(async()=>{try{await updateData();console.log(`Snapshot Tiny atualizado: ${brHour(new Date())}`)}catch(error){console.error(`Atualização Tiny: ${error.message}`)}schedule()},Math.max(delay,2000));
+  const now = new Date(), delay = (30 - now.getMinutes() % 30) * 60000 - now.getSeconds() * 1000 - now.getMilliseconds() + 2000;
+  setTimeout(async () => {
+    if (!syncQueue.paused) {
+      try {
+        await updateData();
+        console.log(`Snapshot Tiny atualizado: ${brHour(new Date())}`);
+      } catch (error) {
+        console.error(`Atualização Tiny: ${error.message}`);
+      }
+    }
+    schedule();
+  }, Math.max(delay, 2000));
 }
-function json(res,code,body){res.writeHead(code,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});res.end(JSON.stringify(body));}
-function serve(req,res){const url=new URL(req.url,'http://localhost'),file=url.pathname==='/'?'index.html':decodeURIComponent(url.pathname.slice(1)),target=path.resolve(PUBLIC,file);if(!target.startsWith(path.resolve(PUBLIC)))return json(res,403,{error:'Acesso negado'});fs.readFile(target,(error,data)=>{if(error)return json(res,404,{error:'Não encontrado'});const type={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.png':'image/png'}[path.extname(target)]||'application/octet-stream';res.writeHead(200,{'Content-Type':type,'Cache-Control':'no-store'});res.end(data);});}
-http.createServer(async(req,res)=>{const url=new URL(req.url,'http://localhost');if(url.pathname==='/api/update-data'){if(process.env.READ_ONLY_PREVIEW==='1')return json(res,409,{error:'Prévia local protegida: atualização da API desativada'});try{return json(res,200,{...await updateData(),reconciliation:reconciliationState})}catch(error){console.error(error);return json(res,500,{error:error.message,reconciliation:reconciliationState})}}if(url.pathname==='/api/data')return json(res,200,{...buildPayload(readJson(SNAPSHOTS,[])),updating:Boolean(updating),reconciliation:reconciliationState});serve(req,res);}).listen(PORT,()=>{console.log(`Black Friday BI Tiny: http://localhost:${PORT}`);if(process.env.DISABLE_AUTO_UPDATE!=='1')schedule();});
+
+function readRequestBody(req) {
+  return new Promise(resolve => {
+    let raw = '';
+    req.on('data', chunk => {
+      if (raw.length < 16384) raw += String(chunk);
+    });
+    req.on('end', () => {
+      if (!raw.trim()) return resolve({});
+      try { resolve(JSON.parse(raw)); } catch { resolve({}); }
+    });
+    req.on('error', () => resolve({}));
+  });
+}
+
+function checkQueueControlAuth(req) {
+  const required = process.env.QUEUE_CONTROL_TOKEN;
+  if (!required) return true;
+  return req.headers['x-queue-token'] === required;
+}
+
+function json(res, code, body) {
+  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+  res.end(JSON.stringify(body));
+}
+
+function serve(req, res) {
+  const url = new URL(req.url, 'http://localhost'),
+    file = url.pathname === '/' ? 'index.html' : decodeURIComponent(url.pathname.slice(1)),
+    target = path.resolve(PUBLIC, file);
+  if (!target.startsWith(path.resolve(PUBLIC))) return json(res, 403, { error: 'Acesso negado' });
+  fs.readFile(target, (error, data) => {
+    if (error) return json(res, 404, { error: 'Não encontrado' });
+    const type = {
+      '.html': 'text/html; charset=utf-8',
+      '.js': 'text/javascript; charset=utf-8',
+      '.css': 'text/css; charset=utf-8',
+      '.png': 'image/png'
+    }[path.extname(target)] || 'application/octet-stream';
+    res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'no-store' });
+    res.end(data);
+  });
+}
+
+http.createServer(async (req, res) => {
+  const url = new URL(req.url, 'http://localhost');
+
+  if (url.pathname === '/api/queue' && req.method === 'GET') {
+    return json(res, 200, {
+      ...getQueueSnapshot(),
+      updating: Boolean(updating),
+      reconciliation: reconciliationState
+    });
+  }
+
+  if (url.pathname === '/api/queue/pause' && req.method === 'POST') {
+    if (process.env.READ_ONLY_PREVIEW === '1') {
+      return json(res, 409, { error: 'Prévia local protegida: controle de fila desativado' });
+    }
+    if (!checkQueueControlAuth(req)) {
+      return json(res, 403, { error: 'Token de controle de fila inválido' });
+    }
+    const body = await readRequestBody(req);
+    const queue = pauseQueue(body.reason);
+    return json(res, 200, { ok: true, queue, reconciliation: reconciliationState });
+  }
+
+  if (url.pathname === '/api/queue/resume' && req.method === 'POST') {
+    if (process.env.READ_ONLY_PREVIEW === '1') {
+      return json(res, 409, { error: 'Prévia local protegida: controle de fila desativado' });
+    }
+    if (!checkQueueControlAuth(req)) {
+      return json(res, 403, { error: 'Token de controle de fila inválido' });
+    }
+    const body = await readRequestBody(req);
+    const triggerNow = body.triggerNow !== false;
+    const queue = resumeQueue({ triggerNow });
+    return json(res, 200, { ok: true, queue, reconciliation: reconciliationState });
+  }
+
+  if (url.pathname === '/api/update-data') {
+    if (process.env.READ_ONLY_PREVIEW === '1') {
+      return json(res, 409, { error: 'Prévia local protegida: atualização da API desativada' });
+    }
+    if (syncQueue.paused) {
+      return json(res, 409, {
+        error: 'Fila pausada: retome a fila antes de atualizar os dados',
+        reconciliation: reconciliationState,
+        queue: getQueueSnapshot()
+      });
+    }
+    try {
+      return json(res, 200, {
+        ...await updateData(),
+        reconciliation: reconciliationState,
+        queue: getQueueSnapshot()
+      });
+    } catch (error) {
+      console.error(error);
+      const statusCode = error.code === 'QUEUE_PAUSED' ? 409 : 500;
+      return json(res, statusCode, {
+        error: error.message,
+        reconciliation: reconciliationState,
+        queue: getQueueSnapshot()
+      });
+    }
+  }
+
+  if (url.pathname === '/api/data') {
+    return json(res, 200, {
+      ...buildPayload(readJson(SNAPSHOTS, [])),
+      updating: Boolean(updating),
+      reconciliation: reconciliationState,
+      queue: getQueueSnapshot()
+    });
+  }
+
+  serve(req, res);
+}).listen(PORT, () => {
+  console.log(`Black Friday BI Tiny: http://localhost:${PORT}`);
+  if (process.env.DISABLE_AUTO_UPDATE !== '1') schedule();
+});

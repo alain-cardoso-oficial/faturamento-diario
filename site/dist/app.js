@@ -2,6 +2,7 @@ const channels=[
   {name:'Meli',aliases:['Mercado Livre'],short:'ML',color:'#ffe600',ink:'#222',domain:'mercadolivre.com.br'},{name:'Shopee',short:'S',color:'#ee4d2d',domain:'shopee.com.br'},{name:'Amazon',short:'a',color:'#232f3e',domain:'amazon.com.br'},{name:'MagaLu',aliases:['Magazine Luiza'],short:'M',color:'#0086ff',domain:'magazineluiza.com.br'},{name:'Site',aliases:['Site Oficial'],short:'●',color:'#ff5a00',domain:'oficialwebshop.com.br'},{name:'TikTok',aliases:['TikTok Shop'],short:'♪',color:'#111',domain:'tiktok.com'},{name:'AliExpress',short:'AE',color:'#e62e04',domain:'aliexpress.com'},{name:'Via',aliases:['Casas Bahia'],short:'CB',color:'#1434a4',domain:'casasbahia.com.br'},{name:'WebContinental',short:'WC',color:'#0b3d78',domain:'webcontinental.com.br'},{name:'Madeira',short:'MM',color:'#ff6433',domain:'madeiramadeira.com.br'},{name:'Carrefour',short:'C',color:'#fff',ink:'#173d7a',domain:'carrefour.com.br'},{name:'Kabum',short:'K',color:'#ff6500',domain:'kabum.com.br'},{name:'Leroy',short:'LM',color:'#67a42f',domain:'leroymerlin.com.br'},{name:'Martins',short:'M',color:'#d71920',domain:'martinsatacado.com.br'}
 ];
 const hours=['00h','02h','04h','06h','08h','10h','12h','14h','16h','18h','20h','22h'];
+const defaultCompanies=window.ORDER_CLASSIFIER?.KNOWN_COMPANIES||['Oficial','Prioriza','OFICIALSP','OFICIALSP2'];
 let data=[];
 let activeChannel='all';
 let liveMetrics={totalOrders:0,ticket:0};
@@ -10,6 +11,7 @@ let currentChannels={};
 let previousChannels={};
 let analyticData=[];
 let rankingPage=0,lastRanking=[],lastRankingTotal=0;
+let queueState={status:'idle',paused:false,attempt:0,maxAttempts:6,pendingTotal:0,accounts:[]};
 const targetApi=window.DAILY_TARGETS;
 let activeDataDate=targetApi?targetApi.brDateIso():'';
 let serverTarget;
@@ -81,11 +83,94 @@ function renderChart(){
 function renderSpark(){let vals=hours.map((_,i)=>data.reduce((s,d)=>s+(d.hours[i]?.value||0),0)),max=Math.max(...vals),min=Math.min(...vals),pts=vals.map((v,i)=>`${i/(vals.length-1)*116},${36-(v-min)/(max-min||1)*32}`).join(' ');document.querySelector('#sparkline').innerHTML=`<svg viewBox="0 0 118 38"><polyline points="${pts}" fill="none" stroke="#ff6410" stroke-width="2"/><polyline points="0,38 ${pts} 118,38" fill="#ff5a0015" stroke="none"/></svg>`}
 function stamp(){document.querySelector('#lastUpdate').textContent=new Intl.DateTimeFormat('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}).format(new Date())}
 function toast(t){const e=document.querySelector('#toast');e.textContent=t;e.classList.add('show');setTimeout(()=>e.classList.remove('show'),2600)}
-function renderAnalytics(){const q=document.querySelector('#analyticSearch').value.trim().toLowerCase(),company=document.querySelector('#analyticCompany').value,canal=document.querySelector('#analyticChannel').value,filtered=analyticData.filter(x=>(company==='all'||x.empresa===company)&&(canal==='all'||x.canal===canal)&&(!q||[x.pedido,x.empresa,x.canal,x.ecommerce,x.situacao].some(v=>String(v).toLowerCase().includes(q))));document.querySelector('#analyticOrders').textContent=new Intl.NumberFormat('pt-BR').format(analyticData.length);document.querySelector('#analyticGmv').textContent=money(analyticData.reduce((s,x)=>s+(+x.valor||0),0));document.querySelector('#analyticComplete').textContent=(analyticData.length?analyticData.filter(x=>x.detalhe==='Completo').length/analyticData.length*100:0).toFixed(0)+'%';document.querySelector('#analyticsRows').innerHTML=filtered.length?filtered.map(x=>`<tr><td><b>${x.pedido}</b></td><td>${x.empresa}</td><td><span class="channel-pill">${x.canal}</span></td><td>${x.ecommerce}</td><td>${x.situacao}</td><td class="${x.detalhe==='Completo'?'detail-complete':'detail-pending'}">${x.detalhe}</td><td>${fullMoney(x.valor)}</td></tr>`).join(''):'<tr><td colspan="7" class="empty-table">Nenhum pedido encontrado com os filtros selecionados.</td></tr>'}
-function setupAnalytics(payload){analyticData=payload.analytics||[];const options=[...new Set(analyticData.map(x=>x.canal))].sort();document.querySelector('#analyticChannel').innerHTML='<option value="all">Todos os canais</option>'+options.map(x=>`<option>${x}</option>`).join('');renderAnalytics()}
-async function loadBigQuery(update=false){const endpoint=update?'/api/update-data':'/api/data';try{const response=await fetch(endpoint,{cache:'no-store'});if(!response.ok)throw new Error((await response.json()).error||'Falha na atualização');const payload=await response.json(),reconciliation=payload.reconciliation||{},retrying=reconciliation.status==='retrying';activeDataDate=payload.dataDate||(targetApi?targetApi.brDateIso():activeDataDate);serverTarget=Object.prototype.hasOwnProperty.call(payload,'target')?payload.target:undefined;isUpdating=Boolean(payload.updating)||reconciliation.status==='updating';document.querySelector('#updateStatus').classList.toggle('syncing',isUpdating||retrying);document.querySelector('#statusLabel').textContent=retrying?`RECONCILIANDO ${reconciliation.pending||''} PEDIDOS`:isUpdating?'ATUALIZANDO NOVA JANELA':'ÚLTIMA ATUALIZAÇÃO';setupAnalytics(payload);snapshotHistory=payload.snapshotHistory||[];currentChannels=payload.currentChannels||{};previousChannels=payload.previousChannels||{};if(payload.series?.length){data=payload.series;liveMetrics=payload.metrics||liveMetrics;hours.splice(0,hours.length,...data[0].hours.map(h=>h.hour));document.querySelector('#channelFilter').innerHTML='<option value="all">Todos os canais</option>'+data.map(d=>`<option>${d.channel}</option>`).join('');render();if(payload.updatedAt)document.querySelector('#lastUpdate').textContent=new Intl.DateTimeFormat('pt-BR',{timeZone:'America/Sao_Paulo',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}).format(new Date(payload.updatedAt));return true}data=[];liveMetrics={totalOrders:0,ticket:0};currentChannels={};previousChannels={};document.querySelector('#channelFilter').innerHTML='<option value="all">Todos os canais</option>';renderEmpty();if(update&&payload.waitingForLoad)toast('A primeira carga de hoje ainda não saiu');return true}catch(error){if(update)toast('Tiny: '+error.message);return false}}
+function isRowFulfillment(x){return Boolean(x?.fulfillment)||String(x?.modalidade||'').toLowerCase()==='fulfillment'}
+function renderAnalytics(){
+  const q=document.querySelector('#analyticSearch').value.trim().toLowerCase(),
+    company=document.querySelector('#analyticCompany').value,
+    canal=document.querySelector('#analyticChannel').value,
+    ffFilterEl=document.querySelector('#analyticFulfillment'),
+    ffFilter=ffFilterEl?ffFilterEl.value:'all',
+    filtered=analyticData.filter(x=>{
+      const isFf=isRowFulfillment(x),modLabel=isFf?'Fulfillment':'Padrão',ffOrigin=x.fulfillmentOrigem?String(x.fulfillmentOrigem):'';
+      const matchCompany=company==='all'||x.empresa===company;
+      const matchChannel=canal==='all'||x.canal===canal;
+      const matchFf=ffFilter==='all'||(ffFilter==='fulfillment'?isFf:!isFf);
+      const matchQuery=!q||[x.pedido,x.empresa,x.canal,x.ecommerce,x.situacao,modLabel,ffOrigin].some(v=>String(v||'').toLowerCase().includes(q));
+      return matchCompany&&matchChannel&&matchFf&&matchQuery;
+    });
+  document.querySelector('#analyticOrders').textContent=new Intl.NumberFormat('pt-BR').format(analyticData.length);
+  document.querySelector('#analyticGmv').textContent=money(analyticData.reduce((s,x)=>s+(+x.valor||0),0));
+  document.querySelector('#analyticComplete').textContent=(analyticData.length?analyticData.filter(x=>x.detalhe==='Completo').length/analyticData.length*100:0).toFixed(0)+'%';
+  document.querySelector('#analyticsRows').innerHTML=filtered.length?filtered.map(x=>{
+    const isFf=isRowFulfillment(x),ffOrigin=x.fulfillmentOrigem?String(x.fulfillmentOrigem):'';
+    const modHtml=isFf?`<span class="fulfillment-pill" title="${ffOrigin||'Fulfillment'}">Fulfillment${ffOrigin?` • ${ffOrigin}`:''}</span>`:'<span class="standard-pill">Padrão</span>';
+    return `<tr><td><b>${x.pedido}</b></td><td>${x.empresa}</td><td><span class="channel-pill">${x.canal}</span></td><td>${x.ecommerce}</td><td>${modHtml}</td><td>${x.situacao}</td><td class="${x.detalhe==='Completo'?'detail-complete':'detail-pending'}">${x.detalhe}</td><td>${fullMoney(x.valor)}</td></tr>`;
+  }).join(''):'<tr><td colspan="8" class="empty-table">Nenhum pedido encontrado com os filtros selecionados.</td></tr>';
+}
+function setupAnalytics(payload){
+  analyticData=payload.analytics||[];
+  const companyEl=document.querySelector('#analyticCompany');
+  if(companyEl){
+    const prevCompany=companyEl.value||'all';
+    const companies=[...new Set([...defaultCompanies,...analyticData.map(x=>x.empresa).filter(Boolean)])];
+    companyEl.innerHTML='<option value="all">Todas as empresas</option>'+companies.map(c=>`<option>${c}</option>`).join('');
+    companyEl.value=companies.includes(prevCompany)?prevCompany:'all';
+  }
+  const channelEl=document.querySelector('#analyticChannel');
+  const prevChannel=channelEl?channelEl.value:'all';
+  const options=[...new Set(analyticData.map(x=>x.canal))].sort();
+  channelEl.innerHTML='<option value="all">Todos os canais</option>'+options.map(x=>`<option>${x}</option>`).join('');
+  if(options.includes(prevChannel))channelEl.value=prevChannel;
+  renderAnalytics();
+}
+function renderQueueState(queue,reconciliation={}){
+  if(queue)queueState=queue;
+  const q=queueState||{},paused=Boolean(q.paused)||q.status==='paused'||reconciliation.status==='paused',retrying=q.status==='waiting_retry'||reconciliation.status==='retrying',failed=q.status==='failed'||reconciliation.status==='failed',running=q.status==='running'||isUpdating;
+  const badgeEl=document.querySelector('#queueBadge'),toggleBtn=document.querySelector('#queueToggleBtn'),summaryEl=document.querySelector('#queueSummaryText'),pauseBtn=document.querySelector('#queuePauseResumeBtn'),accountsEl=document.querySelector('#queueAccounts');
+  if(badgeEl)badgeEl.textContent=paused?'PAUSADA':retrying?`RETRY #${q.attempt||1}`:failed?'FALHA':running?'ATIVA':'OK';
+  if(toggleBtn){toggleBtn.classList.toggle('paused',paused);toggleBtn.classList.toggle('retrying',retrying||failed)}
+  if(pauseBtn){pauseBtn.textContent=paused?'Retomar fila':'Pausar fila';pauseBtn.classList.toggle('resume',paused);pauseBtn.classList.toggle('warn',!paused)}
+  if(summaryEl){
+    if(paused)summaryEl.textContent=`Fila pausada (${q.pausedReason||'pelo usuário'}) • ${q.pendingTotal||0} pedido(s) pendente(s).`;
+    else if(retrying)summaryEl.textContent=`Retry exponencial #${q.attempt||1}/${q.maxAttempts||6} agendado (${Math.max(1,Math.round((q.backoffMs||0)/1000))}s) • ${q.lastError||reconciliation.message||''}`;
+    else if(failed)summaryEl.textContent=`Falha após ${q.attempt||0} tentativa(s): ${q.lastError||reconciliation.message||''}`;
+    else if(running)summaryEl.textContent=q.currentTask?`Processando ${q.currentTask.empresa} (${q.currentTask.stage}${q.currentTask.pedidoId?' #'+q.currentTask.pedidoId:''})`:'Sincronizando pedidos do dia...';
+    else summaryEl.textContent='Fila ociosa — todas as contas reconciliadas.';
+  }
+  if(accountsEl&&Array.isArray(q.accounts)){
+    accountsEl.innerHTML=q.accounts.map(a=>`<div class="queue-card"><div class="queue-card-top"><strong>${a.empresa}</strong><span class="queue-card-status">${a.status||'idle'}</span></div><div class="queue-card-meta">Pedidos: ${a.foundOrders||0} • Processados: ${a.processedOrders||0} • Pendentes: ${a.pendingOrders||0}${a.requiredMarkers?.length?`<br>Marcadores: ${a.requiredMarkers.join(', ')}`:''}</div>${a.lastError?`<div class="queue-card-error">${a.lastError}</div>`:''}</div>`).join('');
+  }
+}
+async function fetchQueueStatus(){
+  try{
+    const res=await fetch('/api/queue',{cache:'no-store'});
+    if(!res.ok)return false;
+    const payload=await res.json();
+    renderQueueState(payload,payload.reconciliation||{});
+    return true;
+  }catch{return false}
+}
+async function toggleQueuePause(){
+  const paused=Boolean(queueState?.paused)||queueState?.status==='paused';
+  if(!paused&&typeof window.confirm==='function'&&!window.confirm('Deseja pausar a fila de consultas na API Tiny?'))return false;
+  const endpoint=paused?'/api/queue/resume':'/api/queue/pause';
+  try{
+    const res=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({reason:'Pausado via painel executivo'})});
+    const payload=await res.json();
+    if(!res.ok)throw new Error(payload.error||'Falha ao alterar estado da fila');
+    renderQueueState(payload.queue,payload.reconciliation||{});
+    toast(paused?'Fila de consultas retomada':'Fila de consultas pausada');
+    if(paused)await loadBigQuery(false);
+    return true;
+  }catch(error){toast('Fila: '+error.message);return false}
+}
+async function loadBigQuery(update=false){const endpoint=update?'/api/update-data':'/api/data';try{const response=await fetch(endpoint,{cache:'no-store'});if(!response.ok){const errBody=await response.json().catch(()=>({}));if(errBody.queue)renderQueueState(errBody.queue,errBody.reconciliation||{});throw new Error(errBody.error||'Falha na atualização')}const payload=await response.json(),reconciliation=payload.reconciliation||{},paused=reconciliation.status==='paused'||payload.queue?.paused,retrying=reconciliation.status==='retrying';activeDataDate=payload.dataDate||(targetApi?targetApi.brDateIso():activeDataDate);serverTarget=Object.prototype.hasOwnProperty.call(payload,'target')?payload.target:undefined;isUpdating=Boolean(payload.updating)||reconciliation.status==='updating';renderQueueState(payload.queue,reconciliation);document.querySelector('#updateStatus').classList.toggle('syncing',isUpdating||retrying);document.querySelector('#statusLabel').textContent=paused?'FILA PAUSADA':retrying?`RECONCILIANDO ${reconciliation.pending||''} PEDIDOS`:isUpdating?'ATUALIZANDO NOVA JANELA':'ÚLTIMA ATUALIZAÇÃO';setupAnalytics(payload);snapshotHistory=payload.snapshotHistory||[];currentChannels=payload.currentChannels||{};previousChannels=payload.previousChannels||{};if(payload.series?.length){data=payload.series;liveMetrics=payload.metrics||liveMetrics;hours.splice(0,hours.length,...data[0].hours.map(h=>h.hour));document.querySelector('#channelFilter').innerHTML='<option value="all">Todos os canais</option>'+data.map(d=>`<option>${d.channel}</option>`).join('');render();if(payload.updatedAt)document.querySelector('#lastUpdate').textContent=new Intl.DateTimeFormat('pt-BR',{timeZone:'America/Sao_Paulo',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}).format(new Date(payload.updatedAt));return true}data=[];liveMetrics={totalOrders:0,ticket:0};currentChannels={};previousChannels={};document.querySelector('#channelFilter').innerHTML='<option value="all">Todos os canais</option>';renderEmpty();if(update&&payload.waitingForLoad)toast('A primeira carga de hoje ainda não saiu');return true}catch(error){if(update)toast('Tiny: '+error.message);return false}}
 document.querySelector('#refreshBtn').addEventListener('click',async e=>{e.currentTarget.classList.add('loading');const ok=await loadBigQuery(true);e.currentTarget.classList.remove('loading');if(ok)toast('Tiny atualizado e snapshot registrado')});
+const queueToggleBtn=document.querySelector('#queueToggleBtn');if(queueToggleBtn)queueToggleBtn.addEventListener('click',()=>{const p=document.querySelector('#queuePanel');if(p){p.hidden=!p.hidden;if(!p.hidden)fetchQueueStatus()}});
+const queueRefreshBtn=document.querySelector('#queueRefreshBtn');if(queueRefreshBtn)queueRefreshBtn.addEventListener('click',()=>fetchQueueStatus());
+const queuePauseResumeBtn=document.querySelector('#queuePauseResumeBtn');if(queuePauseResumeBtn)queuePauseResumeBtn.addEventListener('click',()=>toggleQueuePause());
 document.querySelector('#channelFilter').innerHTML+=[...channels].map(c=>`<option>${c.name}</option>`).join('');document.querySelector('#channelFilter').addEventListener('change',e=>{activeChannel=e.target.value==='all'?'all':e.target.value;renderChart()});
 document.querySelectorAll('.view-tab').forEach(button=>button.addEventListener('click',()=>{document.querySelectorAll('.view-tab,.report-view').forEach(x=>x.classList.remove('active'));button.classList.add('active');document.querySelector('#'+button.dataset.view).classList.add('active')}));document.querySelector('#analyticSearch').addEventListener('input',renderAnalytics);document.querySelector('#analyticCompany').addEventListener('change',renderAnalytics);document.querySelector('#analyticChannel').addEventListener('change',renderAnalytics);
+const analyticFulfillmentEl=document.querySelector('#analyticFulfillment');if(analyticFulfillmentEl)analyticFulfillmentEl.addEventListener('change',renderAnalytics);
 document.querySelector('#fileInput').addEventListener('change',async e=>{const file=e.target.files[0];if(!file)return;try{const text=await file.text(),lines=text.trim().split(/\r?\n/),sep=lines[0].includes(';')?';':',',head=lines.shift().split(sep).map(x=>x.trim().toLowerCase()),ci=head.findIndex(x=>['canal','channel'].includes(x)),hi=head.findIndex(x=>['hora','hour'].includes(x)),vi=head.findIndex(x=>['gmv','valor','value'].includes(x));if([ci,hi,vi].some(x=>x<0))throw Error();const map={};lines.forEach(l=>{const p=l.split(sep),name=p[ci].trim(),hour=p[hi].trim(),value=Number(p[vi].replace(/[^0-9,.-]/g,'').replace('.','').replace(',','.'));if(!map[name])map[name]={};map[name][hour]= (map[name][hour]||0)+value});const newHours=[...new Set(lines.map(l=>l.split(sep)[hi].trim()))];hours.splice(0,hours.length,...newHours);data=Object.entries(map).map(([channel,obj])=>({channel,hours:newHours.map(hour=>({hour,value:obj[hour]||0}))}));activeChannel='all';document.querySelector('#channelFilter').innerHTML='<option value="all">Todos os canais</option>'+data.map(d=>`<option>${d.channel}</option>`).join('');const todayIso=targetApi?targetApi.brDateIso():activeDataDate;if(todayIso&&todayIso!==activeDataDate){activeDataDate=todayIso;serverTarget=undefined;}render();stamp();toast(`${data.length} canais importados com sucesso`)}catch{toast('CSV inválido. Use as colunas: hora, canal, gmv')}});
 setInterval(()=>{const e=document.querySelector('#liveClock');if(e)e.textContent=new Intl.DateTimeFormat('pt-BR',{timeZone:'America/Sao_Paulo',hour:'2-digit',minute:'2-digit',second:'2-digit'}).format(new Date())},1000);setInterval(()=>loadBigQuery(false),15000);stamp();render();loadBigQuery(false);

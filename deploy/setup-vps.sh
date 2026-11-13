@@ -50,6 +50,8 @@ if [ ! -f ".env.local" ]; then
         touch .env.local
         echo "TINY_OFICIAL_TOKEN=" >> .env.local
         echo "TINY_PRIORIZA_TOKEN=" >> .env.local
+        echo "TINY_OFICIALSP_TOKEN=" >> .env.local
+        echo "TINY_OFICIALSP2_TOKEN=" >> .env.local
     fi
 fi
 
